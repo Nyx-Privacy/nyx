@@ -1,0 +1,103 @@
+//! Nyx dark pool — vault program (Phase 1).
+//!
+//! Responsibilities:
+//!   - SPL token custody via per-mint PDA token accounts.
+//!   - UTXO note Merkle tree (Poseidon2 over BN254, depth 20).
+//!   - Nullifier set / consumed-notes set / note locks (all PDA-based).
+//!   - Groth16 verification of VALID_WALLET_CREATE and VALID_SPEND proofs.
+//!   - TEE-forced atomic settlement.
+//!
+//! Reference: Section 23.1 of darkpool_protocol_spec_v3_changed.md
+
+use anchor_lang::prelude::*;
+
+pub mod errors;
+pub mod instructions;
+pub mod merkle;
+pub mod state;
+pub mod zk;
+
+// Anchor's `#[program]` macro looks up `crate::<submod>::__client_accounts_*`
+// and similar helper modules. Re-exporting each instruction submodule at crate
+// root lets the macro resolve everything correctly even though our source lives
+// under `programs/vault/src/instructions/`.
+pub use instructions::create_wallet;
+pub use instructions::deposit;
+pub use instructions::initialize;
+pub use instructions::lock_note;
+pub use instructions::release_lock;
+pub use instructions::tee_forced_settle;
+pub use instructions::withdraw;
+
+use instructions::*;
+use zk::Groth16Proof;
+
+declare_id!("3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb");
+
+#[program]
+pub mod vault {
+    use super::*;
+
+    /// Initialize the global `VaultConfig` singleton. One-time setup.
+    pub fn initialize(ctx: Context<Initialize>, tee_pubkey: Pubkey) -> Result<()> {
+        initialize::initialize_handler(ctx, tee_pubkey)
+    }
+
+    /// Register a User Commitment via VALID_WALLET_CREATE proof.
+    pub fn create_wallet(
+        ctx: Context<CreateWallet>,
+        commitment: [u8; 32],
+        proof: Groth16Proof,
+    ) -> Result<()> {
+        create_wallet::create_wallet_handler(ctx, commitment, proof)
+    }
+
+    /// Deposit SPL tokens into the vault and insert a UTXO note commitment.
+    pub fn deposit(
+        ctx: Context<Deposit>,
+        amount: u64,
+        owner_commitment: [u8; 32],
+        nonce: [u8; 32],
+        blinding_r: [u8; 32],
+    ) -> Result<()> {
+        deposit::deposit_handler(ctx, amount, owner_commitment, nonce, blinding_r)
+    }
+
+    /// Withdraw tokens using a VALID_SPEND proof.
+    pub fn withdraw(
+        ctx: Context<Withdraw>,
+        note_commitment: [u8; 32],
+        nullifier: [u8; 32],
+        merkle_root: [u8; 32],
+        amount: u64,
+        proof: Groth16Proof,
+    ) -> Result<()> {
+        withdraw::withdraw_handler(ctx, note_commitment, nullifier, merkle_root, amount, proof)
+    }
+
+    /// Lock a note to an order (TEE-only).
+    pub fn lock_note(
+        ctx: Context<LockNote>,
+        note_commitment: [u8; 32],
+        order_id: [u8; 16],
+        expiry_slot: u64,
+    ) -> Result<()> {
+        lock_note::lock_note_handler(ctx, note_commitment, order_id, expiry_slot)
+    }
+
+    /// Release an expired note lock.
+    pub fn release_lock(
+        ctx: Context<ReleaseLock>,
+        note_commitment: [u8; 32],
+    ) -> Result<()> {
+        release_lock::release_lock_handler(ctx, note_commitment)
+    }
+
+    /// Atomic TEE-forced settlement.
+    pub fn tee_forced_settle(
+        ctx: Context<TeeForcedSettle>,
+        payload: MatchResultPayload,
+    ) -> Result<()> {
+        tee_forced_settle::tee_forced_settle_handler(ctx, payload)
+    }
+}

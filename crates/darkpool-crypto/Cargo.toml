@@ -1,0 +1,32 @@
+[package]
+name = "darkpool-crypto"
+version.workspace = true
+edition.workspace = true
+description = "Shared cryptographic primitives (Poseidon, note commitments, nullifiers, key derivation) for the Nyx dark pool. Must produce byte-identical output on-chain and off-chain."
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Use light-poseidon for off-chain parity with on-chain sol_poseidon syscall
+solana = ["solana-program"]
+
+[dependencies]
+light-poseidon = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ff = { workspace = true }
+ark-serialize = { workspace = true }
+solana-program = { workspace = true, optional = true }
+
+hkdf = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+borsh = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

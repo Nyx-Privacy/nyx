@@ -1,0 +1,38 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+description = "Nyx dark pool custody vault: UTXO note Merkle tree, nullifier set, consumed-notes set, note locks, Groth16 verification of spend + wallet-create proofs."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vault"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+# Host-side testing (disables BPF-only code paths).
+test-sbf = []
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
+anchor-spl = { workspace = true }
+solana-program = { workspace = true }
+groth16-solana = { workspace = true }
+light-poseidon = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ff = { workspace = true }
+darkpool-crypto = { path = "../../crates/darkpool-crypto" }
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

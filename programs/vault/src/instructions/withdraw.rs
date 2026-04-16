@@ -1,0 +1,193 @@
+use crate::errors::VaultError;
+use crate::state::*;
+use crate::zk::{
+    verifier::make_vk, verify_groth16_proof, vk_valid_spend::*, Groth16Proof,
+};
+use anchor_lang::prelude::*;
+use anchor_spl::token::{transfer_checked, Mint, Token, TokenAccount, TransferChecked};
+
+/// Split a 32-byte Solana pubkey into [lo_u128_be32, hi_u128_be32] — each
+/// encoded as 32 BE bytes (left-padded). Matches `darkpool-crypto`'s
+/// `pubkey_to_fr_pair`, which is what the VALID_SPEND circuit expects.
+fn pubkey_pair_be32(pk: &[u8; 32]) -> [[u8; 32]; 2] {
+    let mut lo = [0u8; 32];
+    lo[16..32].copy_from_slice(&pk[16..32]);
+    let mut hi = [0u8; 32];
+    hi[16..32].copy_from_slice(&pk[0..16]);
+    [lo, hi]
+}
+
+fn u64_be32(v: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..32].copy_from_slice(&v.to_be_bytes());
+    out
+}
+
+#[derive(Accounts)]
+#[instruction(note_commitment: [u8; 32], nullifier: [u8; 32])]
+pub struct Withdraw<'info> {
+    /// Any signer may pay the rent. Authorization is via ZK proof.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [VaultConfig::SEED],
+        bump = vault_config.bump,
+    )]
+    pub vault_config: Account<'info, VaultConfig>,
+
+    pub token_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"vault_token", token_mint.key().as_ref()],
+        bump,
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = destination_token_account.mint == token_mint.key() @ VaultError::Unauthorized,
+    )]
+    pub destination_token_account: Account<'info, TokenAccount>,
+
+    /// If the note has been consumed, this account must exist; we assert
+    /// `consumed_note` is NOT found on the *alternate* path, but because Anchor
+    /// requires all accounts up-front, we use `AccountInfo` + manual deref to
+    /// reject only if it is initialized.
+    /// (Layer-3 guard before ZK verification — Section 19.4 of the spec.)
+    #[account(
+        seeds = [ConsumedNoteEntry::SEED, note_commitment.as_ref()],
+        bump,
+    )]
+    /// CHECK: validated manually in the handler.
+    pub consumed_note_slot: AccountInfo<'info>,
+
+    /// Same pattern for note lock — must not be initialized.
+    #[account(
+        seeds = [NoteLock::SEED, note_commitment.as_ref()],
+        bump,
+    )]
+    /// CHECK: validated manually in the handler.
+    pub note_lock_slot: AccountInfo<'info>,
+
+    /// Nullifier PDA. If already initialized, the withdrawal is a double-spend.
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + NullifierEntry::INIT_SPACE,
+        seeds = [NullifierEntry::SEED, nullifier.as_ref()],
+        bump,
+    )]
+    pub nullifier_entry: Account<'info, NullifierEntry>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn withdraw_handler(
+    ctx: Context<Withdraw>,
+    note_commitment: [u8; 32],
+    nullifier: [u8; 32],
+    merkle_root: [u8; 32],
+    amount: u64,
+    proof: Groth16Proof,
+) -> Result<()> {
+    require!(amount > 0, VaultError::ZeroAmount);
+
+    // ----- Layer 3: consumed-notes guard -----
+    // If the slot is already initialized (owner == program_id, has data), reject.
+    {
+        let info = &ctx.accounts.consumed_note_slot;
+        // Uninitialized PDA: owner = system_program, data empty.
+        if info.owner == ctx.program_id {
+            return err!(VaultError::NoteAlreadyConsumed);
+        }
+    }
+
+    // ----- Layer 1: note-lock guard -----
+    {
+        let info = &ctx.accounts.note_lock_slot;
+        if info.owner == ctx.program_id {
+            // Check expiry — lock is effective only until expiry_slot.
+            let data = info.try_borrow_data()?;
+            // Anchor prefixes 8-byte discriminator; then fields laid out by `#[account]`.
+            // For the guard we only need the expiry_slot — it's safer to reject any
+            // initialized lock and require the user to call `release_lock` first.
+            let _ = data;
+            return err!(VaultError::NoteAlreadyLocked);
+        }
+    }
+
+    // ----- Merkle root must be recent -----
+    require!(
+        ctx.accounts.vault_config.contains_root(&merkle_root),
+        VaultError::StaleMerkleRoot
+    );
+
+    // ----- Verify ZK proof -----
+    // VALID_SPEND public inputs: [merkleRoot, nullifier, tokenMint[0], tokenMint[1], amount]
+    let mint_bytes = ctx.accounts.token_mint.key().to_bytes();
+    let [mint_lo, mint_hi] = pubkey_pair_be32(&mint_bytes);
+    let public_inputs: [[u8; 32]; 5] = [
+        merkle_root,
+        nullifier,
+        mint_lo,
+        mint_hi,
+        u64_be32(amount),
+    ];
+
+    let vk = make_vk(
+        &VALID_SPEND_ALPHA_G1,
+        &VALID_SPEND_BETA_G2,
+        &VALID_SPEND_GAMMA_G2,
+        &VALID_SPEND_DELTA_G2,
+        &VALID_SPEND_IC,
+    );
+    verify_groth16_proof::<5>(&vk, &proof, &public_inputs)?;
+
+    // ----- Mark nullifier as spent -----
+    let n = &mut ctx.accounts.nullifier_entry;
+    n.nullifier = nullifier;
+    n.spent_slot = Clock::get()?.slot;
+    n.bump = ctx.bumps.nullifier_entry;
+
+    // ----- Transfer tokens out -----
+    let bump = ctx.accounts.vault_config.bump;
+    let cfg_seeds: &[&[u8]] = &[VaultConfig::SEED, &[bump]];
+    let signer_seeds: &[&[&[u8]]] = &[cfg_seeds];
+
+    let cpi_accounts = TransferChecked {
+        from: ctx.accounts.vault_token_account.to_account_info(),
+        to: ctx.accounts.destination_token_account.to_account_info(),
+        mint: ctx.accounts.token_mint.to_account_info(),
+        authority: ctx.accounts.vault_config.to_account_info(),
+    };
+    transfer_checked(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+            signer_seeds,
+        ),
+        amount,
+        ctx.accounts.token_mint.decimals,
+    )?;
+
+    emit!(Withdrawn {
+        nullifier,
+        note_commitment,
+        token_mint: ctx.accounts.token_mint.key(),
+        amount,
+    });
+
+    Ok(())
+}
+
+#[event]
+pub struct Withdrawn {
+    pub nullifier: [u8; 32],
+    pub note_commitment: [u8; 32],
+    pub token_mint: Pubkey,
+    pub amount: u64,
+}

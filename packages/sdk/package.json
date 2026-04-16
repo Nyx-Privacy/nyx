@@ -1,0 +1,24 @@
+{
+  "name": "@nyx/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nyx dark pool TypeScript SDK — factory-function API, injectable providers, staged errors.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@solana/web3.js": "^1.98.0",
+    "circomlibjs": "^0.1.7"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}

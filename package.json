@@ -1,0 +1,34 @@
+{
+  "name": "nyx-darkpool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Solana dark pool with MagicBlock PER (TEE) and ZK settlement",
+  "workspaces": [
+    "packages/*",
+    "circuits"
+  ],
+  "scripts": {
+    "build:circuits": "bash scripts/build-circuits.sh",
+    "setup:ptau": "bash scripts/download-ptau.sh",
+    "test:sdk": "npm -w @nyx/sdk run test",
+    "test:prover": "npm -w @nyx/web-zk-prover run test",
+    "typecheck": "tsc -b packages",
+    "format": "prettier --write \"packages/**/*.{ts,tsx,json}\""
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@magicblock-labs/ephemeral-rollups-sdk": "^0.6.5",
+    "@solana/web3.js": "^1.98.0",
+    "@types/node": "^20.11.0",
+    "circom_tester": "^0.0.19",
+    "circomlib": "^2.0.5",
+    "prettier": "^3.2.5",
+    "snarkjs": "^0.7.5",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

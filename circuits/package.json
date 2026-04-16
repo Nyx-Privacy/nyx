@@ -1,0 +1,17 @@
+{
+  "name": "@nyx/circuits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Circom ZK circuits for the Nyx dark pool (VALID_SPEND, VALID_WALLET_CREATE, etc.)",
+  "scripts": {
+    "build": "bash ../scripts/build-circuits.sh",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "circomlib": "^2.0.5"
+  },
+  "devDependencies": {
+    "snarkjs": "^0.7.5",
+    "vitest": "^2.0.0"
+  }
+}

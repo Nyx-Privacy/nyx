@@ -1,0 +1,42 @@
+use crate::errors::VaultError;
+use crate::state::*;
+use anchor_lang::prelude::*;
+
+#[derive(Accounts)]
+#[instruction(note_commitment: [u8; 32])]
+pub struct ReleaseLock<'info> {
+    /// Any signer may trigger a release after expiry (rent refund goes to them).
+    #[account(mut)]
+    pub rent_receiver: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [NoteLock::SEED, note_commitment.as_ref()],
+        bump = note_lock.bump,
+        close = rent_receiver,
+    )]
+    pub note_lock: Account<'info, NoteLock>,
+}
+
+pub fn release_lock_handler(
+    ctx: Context<ReleaseLock>,
+    _note_commitment: [u8; 32],
+) -> Result<()> {
+    let clock = Clock::get()?;
+    require!(
+        clock.slot >= ctx.accounts.note_lock.expiry_slot,
+        VaultError::LockNotExpired
+    );
+
+    emit!(NoteLockReleased {
+        note_commitment: ctx.accounts.note_lock.note_commitment,
+        order_id: ctx.accounts.note_lock.order_id,
+    });
+    Ok(())
+}
+
+#[event]
+pub struct NoteLockReleased {
+    pub note_commitment: [u8; 32],
+    pub order_id: [u8; 16],
+}

@@ -1,0 +1,25 @@
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+
+[programs.devnet]
+vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "echo 'use cargo test + npm test'"
+
+[test.validator]
+url = "https://api.devnet.solana.com"
+
+[workspace]
+members = ["programs/vault"]

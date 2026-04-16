@@ -1,0 +1,56 @@
+# Rust
+target/
+**/target/
+*.rs.bk
+Cargo.lock.bak
+
+# Anchor
+.anchor/
+test-ledger/
+
+# Node
+node_modules/
+dist/
+*.log
+.turbo/
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.devnet.example
+!.env.mainnet.example
+
+# Solana keypairs (never commit)
+*.json.key
+*-keypair.json
+tests/fixtures/wallets/*.json
+
+# Circom build artifacts (generated)
+circuits/build/
+circuits/**/*.r1cs
+circuits/**/*.sym
+circuits/**/*_js/
+circuits/**/*.zkey
+!circuits/**/*_final.zkey
+
+# Powers of Tau (large files, downloaded)
+scripts/ptau/*.ptau
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+#misc
+darkpool/
+darkpool_protocol_spec_v3_changed.md
+
+#agents
+.agents/
+.factory/
+skills-lock.json
+
