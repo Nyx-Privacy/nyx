@@ -10,17 +10,35 @@
 use crate::errors::VaultError;
 use crate::state::{VaultConfig, MERKLE_DEPTH};
 use anchor_lang::prelude::*;
+#[cfg(not(target_os = "solana"))]
 use ark_bn254::Fr;
+#[cfg(not(target_os = "solana"))]
 use light_poseidon::{Poseidon, PoseidonBytesHasher};
+#[cfg(target_os = "solana")]
+use solana_poseidon::{hashv, Endianness, Parameters};
 
 /// Compute Poseidon2(left, right). We use `light-poseidon` both on-chain and
 /// off-chain so byte outputs are guaranteed identical. The on-chain BPF
 /// version of light-poseidon uses pure Rust arithmetic (no syscalls).
 pub fn poseidon2(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
+    #[cfg(target_os = "solana")]
+    {
+        return hashv(
+            Parameters::Bn254X5,
+            Endianness::BigEndian,
+            &[left.as_slice(), right.as_slice()],
+        )
+        .map(|h| h.to_bytes())
+        .map_err(|_| error!(VaultError::InvalidProof));
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    {
     let mut h = Poseidon::<Fr>::new_circom(2)
         .map_err(|_| error!(VaultError::InvalidProof))?;
     h.hash_bytes_be(&[left.as_slice(), right.as_slice()])
         .map_err(|_| error!(VaultError::InvalidProof))
+    }
 }
 
 /// Initialize zero_subtree_roots using Poseidon: z0 = 0, z_{i+1} = Poseidon2(z_i, z_i).

@@ -6,7 +6,7 @@ use crate::zk::{
 use anchor_lang::prelude::*;
 
 #[derive(Accounts)]
-#[instruction(commitment: [u8; 32])]
+#[instruction(commitment: [u8; 32], proof: Groth16Proof)]
 pub struct CreateWallet<'info> {
     /// Root Key signer.
     #[account(mut)]

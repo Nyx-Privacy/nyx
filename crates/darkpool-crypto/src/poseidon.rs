@@ -11,7 +11,10 @@
 
 use crate::errors::CryptoError;
 use crate::field::{fr_from_be_bytes, fr_to_be_bytes, Fr, FR_BYTES};
+#[cfg(not(target_os = "solana"))]
 use light_poseidon::{Poseidon, PoseidonBytesHasher};
+#[cfg(target_os = "solana")]
+use solana_poseidon::{hashv, Endianness, Parameters};
 
 /// Hash a sequence of BN254 field elements and return the resulting field element.
 ///
@@ -29,6 +32,16 @@ pub fn poseidon_hash(inputs: &[Fr]) -> Result<Fr, CryptoError> {
 /// Hash a sequence of 32-byte big-endian field encodings and return 32 big-endian bytes.
 /// This is the canonical low-level form used across all three environments.
 pub fn poseidon_hash_bytes(inputs: &[[u8; FR_BYTES]]) -> Result<[u8; FR_BYTES], CryptoError> {
+    #[cfg(target_os = "solana")]
+    {
+        let input_refs: Vec<&[u8]> = inputs.iter().map(|b| b.as_slice()).collect();
+        let out = hashv(Parameters::Bn254X5, Endianness::BigEndian, &input_refs)
+            .map_err(|e| CryptoError::Poseidon(format!("hash syscall: {:?}", e)))?;
+        return Ok(out.to_bytes());
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    {
     let mut hasher = Poseidon::<Fr>::new_circom(inputs.len())
         .map_err(|e| CryptoError::Poseidon(format!("init (arity {}): {:?}", inputs.len(), e)))?;
     let input_refs: Vec<&[u8]> = inputs.iter().map(|b| b.as_slice()).collect();
@@ -36,6 +49,7 @@ pub fn poseidon_hash_bytes(inputs: &[[u8; FR_BYTES]]) -> Result<[u8; FR_BYTES], 
         .hash_bytes_be(&input_refs)
         .map_err(|e| CryptoError::Poseidon(format!("hash: {:?}", e)))?;
     Ok(out)
+    }
 }
 
 #[cfg(test)]

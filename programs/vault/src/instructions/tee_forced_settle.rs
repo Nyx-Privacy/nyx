@@ -26,6 +26,7 @@ use crate::state::*;
 use anchor_lang::prelude::*;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[instruction(payload: MatchResultPayload)]
 pub struct MatchResultPayload {
     pub match_id: [u8; 16],
     pub note_a_commitment: [u8; 32],

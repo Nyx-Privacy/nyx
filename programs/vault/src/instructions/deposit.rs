@@ -6,6 +6,7 @@ use anchor_spl::token::{transfer_checked, Mint, Token, TokenAccount, TransferChe
 use darkpool_crypto::note::commitment_from_fields;
 
 #[derive(Accounts)]
+#[instruction(amount: u64, owner_commitment: [u8; 32], nonce: [u8; 32], blinding_r: [u8; 32])]
 pub struct Deposit<'info> {
     #[account(mut)]
     pub depositor: Signer<'info>,

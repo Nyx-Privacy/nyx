@@ -24,7 +24,7 @@ fn u64_be32(v: u64) -> [u8; 32] {
 }
 
 #[derive(Accounts)]
-#[instruction(note_commitment: [u8; 32], nullifier: [u8; 32])]
+#[instruction(note_commitment: [u8; 32], nullifier: [u8; 32], merkle_root: [u8; 32], amount: u64, proof: Groth16Proof)]
 pub struct Withdraw<'info> {
     /// Any signer may pay the rent. Authorization is via ZK proof.
     #[account(mut)]
