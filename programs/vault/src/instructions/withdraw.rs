@@ -5,6 +5,7 @@ use crate::zk::{
 };
 use anchor_lang::prelude::*;
 use anchor_spl::token::{transfer_checked, Mint, Token, TokenAccount, TransferChecked};
+use core::mem::size_of;
 
 /// Split a 32-byte Solana pubkey into [lo_u128_be32, hi_u128_be32] — each
 /// encoded as 32 BE bytes (left-padded). Matches `darkpool-crypto`'s
@@ -33,9 +34,9 @@ pub struct Withdraw<'info> {
     #[account(
         mut,
         seeds = [VaultConfig::SEED],
-        bump = vault_config.bump,
+        bump,
     )]
-    pub vault_config: Account<'info, VaultConfig>,
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     pub token_mint: Account<'info, Mint>,
 
@@ -76,11 +77,11 @@ pub struct Withdraw<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + NullifierEntry::INIT_SPACE,
+        space = 8 + size_of::<NullifierEntry>(),
         seeds = [NullifierEntry::SEED, nullifier.as_ref()],
         bump,
     )]
-    pub nullifier_entry: Account<'info, NullifierEntry>,
+    pub nullifier_entry: AccountLoader<'info, NullifierEntry>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -122,7 +123,7 @@ pub fn withdraw_handler(
 
     // ----- Merkle root must be recent -----
     require!(
-        ctx.accounts.vault_config.contains_root(&merkle_root),
+        ctx.accounts.vault_config.load()?.contains_root(&merkle_root),
         VaultError::StaleMerkleRoot
     );
 
@@ -148,13 +149,14 @@ pub fn withdraw_handler(
     verify_groth16_proof::<5>(&vk, &proof, &public_inputs)?;
 
     // ----- Mark nullifier as spent -----
-    let n = &mut ctx.accounts.nullifier_entry;
+    let n = &mut ctx.accounts.nullifier_entry.load_init()?;
     n.nullifier = nullifier;
     n.spent_slot = Clock::get()?.slot;
     n.bump = ctx.bumps.nullifier_entry;
+    n._padding = [0u8; 7];
 
     // ----- Transfer tokens out -----
-    let bump = ctx.accounts.vault_config.bump;
+    let bump = ctx.accounts.vault_config.load()?.bump;
     let cfg_seeds: &[&[u8]] = &[VaultConfig::SEED, &[bump]];
     let signer_seeds: &[&[&[u8]]] = &[cfg_seeds];
 

@@ -84,6 +84,7 @@ fn fresh_config() -> VaultConfig {
         zero_subtree_roots: zeros,
         right_path: [[0u8; 32]; MERKLE_DEPTH as usize],
         bump: 0,
+        _padding: [0u8; 6],
     }
 }
 

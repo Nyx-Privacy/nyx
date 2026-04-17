@@ -12,25 +12,23 @@ pub struct ReleaseLock<'info> {
     #[account(
         mut,
         seeds = [NoteLock::SEED, note_commitment.as_ref()],
-        bump = note_lock.bump,
+        bump,
         close = rent_receiver,
     )]
-    pub note_lock: Account<'info, NoteLock>,
+    pub note_lock: AccountLoader<'info, NoteLock>,
 }
 
 pub fn release_lock_handler(
     ctx: Context<ReleaseLock>,
     _note_commitment: [u8; 32],
 ) -> Result<()> {
+    let lock = ctx.accounts.note_lock.load()?;
     let clock = Clock::get()?;
-    require!(
-        clock.slot >= ctx.accounts.note_lock.expiry_slot,
-        VaultError::LockNotExpired
-    );
+    require!(clock.slot >= lock.expiry_slot, VaultError::LockNotExpired);
 
     emit!(NoteLockReleased {
-        note_commitment: ctx.accounts.note_lock.note_commitment,
-        order_id: ctx.accounts.note_lock.order_id,
+        note_commitment: lock.note_commitment,
+        order_id: lock.order_id,
     });
     Ok(())
 }

@@ -24,6 +24,7 @@ use crate::errors::VaultError;
 use crate::merkle::append_leaf;
 use crate::state::*;
 use anchor_lang::prelude::*;
+use core::mem::size_of;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 #[instruction(payload: MatchResultPayload)]
@@ -52,67 +53,64 @@ pub struct TeeForcedSettle<'info> {
     #[account(
         mut,
         seeds = [VaultConfig::SEED],
-        bump = vault_config.bump,
-        constraint = tee_authority.key() == vault_config.tee_pubkey @ VaultError::Unauthorized,
+        bump,
     )]
-    pub vault_config: Account<'info, VaultConfig>,
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     // --- locks for input notes ---
     #[account(
         mut,
         seeds = [NoteLock::SEED, payload.note_a_commitment.as_ref()],
-        bump = note_lock_a.bump,
-        constraint = note_lock_a.order_id == payload.order_id_a @ VaultError::NoteNotLockedForOrder,
+        bump,
         close = tee_authority,
     )]
-    pub note_lock_a: Account<'info, NoteLock>,
+    pub note_lock_a: AccountLoader<'info, NoteLock>,
 
     #[account(
         mut,
         seeds = [NoteLock::SEED, payload.note_b_commitment.as_ref()],
-        bump = note_lock_b.bump,
-        constraint = note_lock_b.order_id == payload.order_id_b @ VaultError::NoteNotLockedForOrder,
+        bump,
         close = tee_authority,
     )]
-    pub note_lock_b: Account<'info, NoteLock>,
+    pub note_lock_b: AccountLoader<'info, NoteLock>,
 
     // --- consumed-note markers (must NOT already exist -> init) ---
     #[account(
         init,
         payer = tee_authority,
-        space = 8 + ConsumedNoteEntry::INIT_SPACE,
+        space = 8 + size_of::<ConsumedNoteEntry>(),
         seeds = [ConsumedNoteEntry::SEED, payload.note_a_commitment.as_ref()],
         bump,
     )]
-    pub consumed_a: Account<'info, ConsumedNoteEntry>,
+    pub consumed_a: AccountLoader<'info, ConsumedNoteEntry>,
 
     #[account(
         init,
         payer = tee_authority,
-        space = 8 + ConsumedNoteEntry::INIT_SPACE,
+        space = 8 + size_of::<ConsumedNoteEntry>(),
         seeds = [ConsumedNoteEntry::SEED, payload.note_b_commitment.as_ref()],
         bump,
     )]
-    pub consumed_b: Account<'info, ConsumedNoteEntry>,
+    pub consumed_b: AccountLoader<'info, ConsumedNoteEntry>,
 
     // --- nullifier entries (must NOT already exist -> init) ---
     #[account(
         init,
         payer = tee_authority,
-        space = 8 + NullifierEntry::INIT_SPACE,
+        space = 8 + size_of::<NullifierEntry>(),
         seeds = [NullifierEntry::SEED, payload.nullifier_a.as_ref()],
         bump,
     )]
-    pub nullifier_a_entry: Account<'info, NullifierEntry>,
+    pub nullifier_a_entry: AccountLoader<'info, NullifierEntry>,
 
     #[account(
         init,
         payer = tee_authority,
-        space = 8 + NullifierEntry::INIT_SPACE,
+        space = 8 + size_of::<NullifierEntry>(),
         seeds = [NullifierEntry::SEED, payload.nullifier_b.as_ref()],
         bump,
     )]
-    pub nullifier_b_entry: Account<'info, NullifierEntry>,
+    pub nullifier_b_entry: AccountLoader<'info, NullifierEntry>,
 
     pub system_program: Program<'info, System>,
 }
@@ -122,36 +120,59 @@ pub fn tee_forced_settle_handler(
     payload: MatchResultPayload,
 ) -> Result<()> {
     let clock = Clock::get()?;
+    {
+        let cfg = ctx.accounts.vault_config.load()?;
+        require!(
+            ctx.accounts.tee_authority.key() == cfg.tee_pubkey,
+            VaultError::Unauthorized
+        );
+    }
+    {
+        let lock_a = ctx.accounts.note_lock_a.load()?;
+        let lock_b = ctx.accounts.note_lock_b.load()?;
+        require!(
+            lock_a.order_id == payload.order_id_a,
+            VaultError::NoteNotLockedForOrder
+        );
+        require!(
+            lock_b.order_id == payload.order_id_b,
+            VaultError::NoteNotLockedForOrder
+        );
+    }
 
     // Lock sanity — already enforced by the Accounts constraints (order_id match).
     // Both lock PDAs are closed via `close = tee_authority` automatically.
 
     // Mark consumed notes.
-    let ca = &mut ctx.accounts.consumed_a;
+    let ca = &mut ctx.accounts.consumed_a.load_init()?;
     ca.note_commitment = payload.note_a_commitment;
     ca.match_id = payload.match_id;
     ca.consumed_slot = clock.slot;
     ca.bump = ctx.bumps.consumed_a;
+    ca._padding = [0u8; 7];
 
-    let cb = &mut ctx.accounts.consumed_b;
+    let cb = &mut ctx.accounts.consumed_b.load_init()?;
     cb.note_commitment = payload.note_b_commitment;
     cb.match_id = payload.match_id;
     cb.consumed_slot = clock.slot;
     cb.bump = ctx.bumps.consumed_b;
+    cb._padding = [0u8; 7];
 
     // Mark nullifiers spent.
-    let na = &mut ctx.accounts.nullifier_a_entry;
+    let na = &mut ctx.accounts.nullifier_a_entry.load_init()?;
     na.nullifier = payload.nullifier_a;
     na.spent_slot = clock.slot;
     na.bump = ctx.bumps.nullifier_a_entry;
+    na._padding = [0u8; 7];
 
-    let nb = &mut ctx.accounts.nullifier_b_entry;
+    let nb = &mut ctx.accounts.nullifier_b_entry.load_init()?;
     nb.nullifier = payload.nullifier_b;
     nb.spent_slot = clock.slot;
     nb.bump = ctx.bumps.nullifier_b_entry;
+    nb._padding = [0u8; 7];
 
     // Append output note commitments to Merkle tree.
-    let cfg = &mut ctx.accounts.vault_config;
+    let cfg = &mut ctx.accounts.vault_config.load_mut()?;
     let leaf_c = cfg.leaf_count;
     let _ = append_leaf(cfg, payload.note_c_commitment)?;
     let leaf_d = cfg.leaf_count;

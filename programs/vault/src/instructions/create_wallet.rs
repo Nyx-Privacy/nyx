@@ -4,6 +4,7 @@ use crate::zk::{
     verifier::make_vk, verify_groth16_proof, vk_valid_wallet_create::*, Groth16Proof,
 };
 use anchor_lang::prelude::*;
+use core::mem::size_of;
 
 #[derive(Accounts)]
 #[instruction(commitment: [u8; 32], proof: Groth16Proof)]
@@ -12,16 +13,16 @@ pub struct CreateWallet<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    pub vault_config: Account<'info, VaultConfig>,
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     #[account(
         init,
         payer = owner,
-        space = 8 + WalletEntry::INIT_SPACE,
+        space = 8 + size_of::<WalletEntry>(),
         seeds = [WalletEntry::SEED, commitment.as_ref()],
         bump,
     )]
-    pub wallet_entry: Account<'info, WalletEntry>,
+    pub wallet_entry: AccountLoader<'info, WalletEntry>,
 
     pub system_program: Program<'info, System>,
 }
@@ -44,11 +45,12 @@ pub fn create_wallet_handler(
 
     verify_groth16_proof::<1>(&vk, &proof, &public_inputs)?;
 
-    let w = &mut ctx.accounts.wallet_entry;
+    let w = &mut ctx.accounts.wallet_entry.load_init()?;
     w.commitment = commitment;
     w.owner = ctx.accounts.owner.key();
     w.created_slot = Clock::get()?.slot;
     w.bump = ctx.bumps.wallet_entry;
+    w._padding = [0u8; 7];
 
     emit!(WalletCreated {
         commitment,

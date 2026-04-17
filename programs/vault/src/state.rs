@@ -9,8 +9,7 @@ pub const MERKLE_DEPTH: u8 = 20;
 pub const ROOT_HISTORY_SIZE: usize = 32;
 
 /// Global vault configuration + append-only Merkle tree header + root history.
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
 pub struct VaultConfig {
     /// Admin authority (usually a multisig). Can rotate `tee_pubkey`.
     pub admin: Pubkey,
@@ -23,7 +22,6 @@ pub struct VaultConfig {
     pub current_root: [u8; 32],
     /// Ring buffer of the last `ROOT_HISTORY_SIZE` roots, newest first.
     pub roots: [[u8; 32]; ROOT_HISTORY_SIZE],
-    pub roots_head: u8,
     /// Precomputed empty-subtree roots at each level (0 = leaf, depth-1 = root's children).
     /// Needed to verify append insertions without holding the entire tree on-chain.
     pub zero_subtree_roots: [[u8; 32]; MERKLE_DEPTH as usize],
@@ -31,7 +29,10 @@ pub struct VaultConfig {
     /// append a new leaf by recomputing only MERKLE_DEPTH hashes. This is
     /// exactly the "incremental Merkle tree" pattern from Tornado/Semaphore.
     pub right_path: [[u8; 32]; MERKLE_DEPTH as usize],
+    pub roots_head: u8,
     pub bump: u8,
+    /// Explicit trailing padding so the zero-copy Pod layout has no implicit padding.
+    pub _padding: [u8; 6],
 }
 
 impl VaultConfig {
@@ -39,13 +40,13 @@ impl VaultConfig {
 }
 
 /// PDA marking a registered user commitment (wallet identity).
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
 pub struct WalletEntry {
     pub commitment: [u8; 32],
     pub owner: Pubkey, // the Root Key that signed `create_wallet`
     pub created_slot: u64,
     pub bump: u8,
+    pub _padding: [u8; 7],
 }
 
 impl WalletEntry {
@@ -53,12 +54,12 @@ impl WalletEntry {
 }
 
 /// PDA marking a spent nullifier. Existence of the PDA => nullifier consumed.
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
 pub struct NullifierEntry {
     pub nullifier: [u8; 32],
     pub spent_slot: u64,
     pub bump: u8,
+    pub _padding: [u8; 7],
 }
 
 impl NullifierEntry {
@@ -66,13 +67,13 @@ impl NullifierEntry {
 }
 
 /// PDA marking a note commitment consumed by TEE-forced settlement.
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
 pub struct ConsumedNoteEntry {
     pub note_commitment: [u8; 32],
     pub match_id: [u8; 16],
     pub consumed_slot: u64,
     pub bump: u8,
+    pub _padding: [u8; 7],
 }
 
 impl ConsumedNoteEntry {
@@ -80,14 +81,14 @@ impl ConsumedNoteEntry {
 }
 
 /// PDA locking a note to a specific order. Automatically expires at `expiry_slot`.
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
 pub struct NoteLock {
     pub note_commitment: [u8; 32],
     pub order_id: [u8; 16],
     pub expiry_slot: u64,
     pub locked_by: Pubkey, // the TEE key that locked
     pub bump: u8,
+    pub _padding: [u8; 7],
 }
 
 impl NoteLock {

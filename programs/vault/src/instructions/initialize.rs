@@ -2,6 +2,7 @@ use crate::errors::VaultError;
 use crate::merkle::{compute_zero_subtree_roots, empty_root};
 use crate::state::*;
 use anchor_lang::prelude::*;
+use core::mem::size_of;
 
 #[derive(Accounts)]
 #[instruction(tee_pubkey: Pubkey)]
@@ -12,17 +13,17 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        space = 8 + VaultConfig::INIT_SPACE,
+        space = 8 + size_of::<VaultConfig>(),
         seeds = [VaultConfig::SEED],
         bump,
     )]
-    pub vault_config: Account<'info, VaultConfig>,
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     pub system_program: Program<'info, System>,
 }
 
 pub fn initialize_handler(ctx: Context<Initialize>, tee_pubkey: Pubkey) -> Result<()> {
-    let cfg = &mut ctx.accounts.vault_config;
+    let cfg = &mut ctx.accounts.vault_config.load_init()?;
 
     cfg.admin = ctx.accounts.admin.key();
     cfg.tee_pubkey = tee_pubkey;
@@ -33,6 +34,7 @@ pub fn initialize_handler(ctx: Context<Initialize>, tee_pubkey: Pubkey) -> Resul
     cfg.roots = [[0u8; 32]; ROOT_HISTORY_SIZE];
     cfg.roots_head = 0;
     cfg.bump = ctx.bumps.vault_config;
+    cfg._padding = [0u8; 6];
     let _ = VaultError::ZeroAmount; // keep errors linked in
     Ok(())
 }

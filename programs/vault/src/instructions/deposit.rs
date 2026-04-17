@@ -14,9 +14,9 @@ pub struct Deposit<'info> {
     #[account(
         mut,
         seeds = [VaultConfig::SEED],
-        bump = vault_config.bump,
+        bump,
     )]
-    pub vault_config: Account<'info, VaultConfig>,
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     pub token_mint: Account<'info, Mint>,
 
@@ -78,8 +78,9 @@ pub fn deposit_handler(
     .map_err(|_| error!(VaultError::MalformedPublicInputs))?;
 
     // Append into Merkle tree.
-    let leaf_index = ctx.accounts.vault_config.leaf_count;
-    let new_root = append_leaf(&mut ctx.accounts.vault_config, commitment)?;
+    let cfg = &mut ctx.accounts.vault_config.load_mut()?;
+    let leaf_index = cfg.leaf_count;
+    let new_root = append_leaf(cfg, commitment)?;
 
     emit!(NoteCreated {
         leaf_index,
