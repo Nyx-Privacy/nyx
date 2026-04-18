@@ -14,8 +14,12 @@
 //! the parent. Scope isolation is enforced by the Poseidon preimage resistance.
 
 use crate::errors::CryptoError;
-use crate::field::{pubkey_to_fr_pair, u64_to_fr, Fr};
+use crate::field::{fr_to_be_bytes, pubkey_to_fr_pair, u64_to_fr, Fr};
 use crate::poseidon::poseidon_hash;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 /// Derive a per-pair viewing key from the Master Viewing Key.
 pub fn derive_viewing_key_for_pair(
@@ -36,6 +40,50 @@ pub fn derive_monthly_viewing_key(
 ) -> Result<Fr, CryptoError> {
     let yearly = poseidon_hash(&[*pair_vk, u64_to_fr(year)])?;
     poseidon_hash(&[yearly, u64_to_fr(month)])
+}
+
+/// Derive a symmetric AEAD key from any viewing-key scope (typically a MonthlyVK).
+///
+/// HKDF-SHA256 expands the 32-byte BE encoding of the viewing key into a 32-byte
+/// ChaCha20-Poly1305 key. The label encodes the key purpose so an AEAD key derived
+/// for scope A cannot collide with one derived for scope B.
+pub fn derive_scope_aead_key(scope_vk: &Fr) -> Result<[u8; 32], CryptoError> {
+    let ikm = fr_to_be_bytes(scope_vk);
+    let hk = Hkdf::<Sha256>::new(None, &ikm);
+    let mut okm = [0u8; 32];
+    hk.expand(b"darkpool_scope_aead_v1", &mut okm)
+        .map_err(|e| CryptoError::Hkdf(format!("scope aead: {e:?}")))?;
+    Ok(okm)
+}
+
+/// AEAD-encrypt a payload with a symmetric key derived from the scope viewing key.
+///
+/// Nonce is supplied by the caller (12 bytes). It must be unique per key.
+pub fn scope_aead_encrypt(
+    scope_vk: &Fr,
+    nonce12: &[u8; 12],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let key = derive_scope_aead_key(scope_vk)?;
+    let cipher = ChaCha20Poly1305::new(&key.into());
+    cipher
+        .encrypt(Nonce::from_slice(nonce12), plaintext)
+        .map_err(|e| CryptoError::Aead(format!("encrypt: {e:?}")))
+}
+
+/// AEAD-decrypt a payload. Returns None on authentication failure (the canonical
+/// signal that "this scope key cannot read this ciphertext").
+pub fn scope_aead_decrypt(
+    scope_vk: &Fr,
+    nonce12: &[u8; 12],
+    ciphertext: &[u8],
+) -> Result<Option<Vec<u8>>, CryptoError> {
+    let key = derive_scope_aead_key(scope_vk)?;
+    let cipher = ChaCha20Poly1305::new(&key.into());
+    match cipher.decrypt(Nonce::from_slice(nonce12), ciphertext) {
+        Ok(pt) => Ok(Some(pt)),
+        Err(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -78,5 +126,50 @@ mod tests {
         // be updated and the API review must explicitly approve it.)
         let marker = "one-directional";
         assert!(!marker.is_empty());
+    }
+
+    /// test_viewing_key_scope_isolation (Section 23.2.3):
+    /// MonthlyVK for (SOL/USDC, 2025-01) must NOT decrypt ciphertexts that were
+    /// produced under (SOL/USDC, 2025-02) or (wBTC/USDC, 2025-01).
+    #[test]
+    fn scope_aead_enforces_key_isolation() {
+        let mvk = Fr::from(42u64);
+        let sol = [0x1au8; 32];
+        let usdc = [0x2bu8; 32];
+        let wbtc = [0x3cu8; 32];
+
+        let pair_sol_usdc = derive_viewing_key_for_pair(&mvk, &sol, &usdc).unwrap();
+        let pair_wbtc_usdc = derive_viewing_key_for_pair(&mvk, &wbtc, &usdc).unwrap();
+
+        // Three scoped keys we'll use in the test.
+        let scope_sol_jan = derive_monthly_viewing_key(&pair_sol_usdc, 2025, 1).unwrap();
+        let scope_sol_feb = derive_monthly_viewing_key(&pair_sol_usdc, 2025, 2).unwrap();
+        let scope_wbtc_jan = derive_monthly_viewing_key(&pair_wbtc_usdc, 2025, 1).unwrap();
+        assert_ne!(scope_sol_jan, scope_sol_feb);
+        assert_ne!(scope_sol_jan, scope_wbtc_jan);
+
+        let nonce = [0u8; 12];
+        let plaintext = b"order settled: SOL/USDC @ 2025-01-15T10:00Z, 100 SOL";
+
+        // Encrypt under SOL/USDC January.
+        let ct = scope_aead_encrypt(&scope_sol_jan, &nonce, plaintext).unwrap();
+
+        // Right key decrypts.
+        let ok = scope_aead_decrypt(&scope_sol_jan, &nonce, &ct).unwrap();
+        assert_eq!(ok.as_deref(), Some(&plaintext[..]));
+
+        // Wrong month (same pair) must fail.
+        let wrong_month = scope_aead_decrypt(&scope_sol_feb, &nonce, &ct).unwrap();
+        assert!(wrong_month.is_none(), "Feb key decrypted Jan ciphertext!");
+
+        // Wrong pair (same month) must fail.
+        let wrong_pair = scope_aead_decrypt(&scope_wbtc_jan, &nonce, &ct).unwrap();
+        assert!(wrong_pair.is_none(), "wBTC/USDC key decrypted SOL/USDC ciphertext!");
+
+        // Tampered ciphertext must fail under right key too.
+        let mut bad = ct.clone();
+        bad[0] ^= 0x01;
+        let tampered = scope_aead_decrypt(&scope_sol_jan, &nonce, &bad).unwrap();
+        assert!(tampered.is_none(), "tampered ciphertext must fail AEAD tag");
     }
 }

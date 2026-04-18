@@ -1,29 +1,52 @@
 /**
- * getDepositFunction — factory-function pattern (Appendix C.3).
+ * getDepositFunction — factory-function pattern (Section 23.3.2).
  *
  * Usage:
  *   const deposit = getDepositFunction({ client });
- *   const receipt = await deposit({ tokenMint, amount });
+ *   const receipt = await deposit({
+ *     tokenMint: mintBytes,
+ *     amount: 100_000_000n,
+ *     nonce: 42n,
+ *     depositorTokenAccount: new PublicKey(...),
+ *   });
+ *
+ * Staged errors (Section 23.3.2): each `throw` uses a distinct stage tag so
+ * callers can distinguish "failed before any tx" from "tx sent but not
+ * confirmed" without parsing free-text messages.
  */
+
+import { PublicKey } from "@solana/web3.js";
 
 import type { DarkPoolClient } from "../client.js";
 import type { TransactionCallbacks } from "../providers.js";
 import { DarkPoolError } from "../errors.js";
 import { noteCommitment, ownerCommitment } from "./note.js";
-import { deriveBlindingFactor } from "../keys/key-generators.js";
+import { bn254ToBE32, deriveBlindingFactor } from "../keys/key-generators.js";
+import { buildDepositInstruction, vaultConfigPda } from "../idl/vault-client.js";
+
+/** SPL Token program id (classic, not Token-2022). */
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 export interface DepositParams {
+  /** Fee-payer / signer for the deposit transaction. */
+  depositor: PublicKey;
+  /** 32-byte SPL mint. */
   tokenMint: Uint8Array;
+  /** Amount in base units. */
   amount: bigint;
-  /** Deterministic nonce (usually a per-user monotonically increasing counter). */
+  /** Depositor's SPL associated token account that holds `tokenMint`. */
+  depositorTokenAccount: PublicKey;
+  /** Deterministic nonce (per-user monotonic counter). Must be unique per note. */
   nonce: bigint;
+  /** Override the SPL token program id (for Token-2022). */
+  tokenProgramId?: PublicKey;
   callbacks?: TransactionCallbacks;
 }
 
 export interface DepositReceipt {
   signature: string;
   leafIndex: bigint;
-  noteCommitment: Uint8Array; // 32 bytes BE
+  noteCommitment: Uint8Array;
   notePlaintext: {
     tokenMint: Uint8Array;
     amount: bigint;
@@ -37,23 +60,49 @@ export function getDepositFunction(
   { client }: { client: DarkPoolClient },
 ): (params: DepositParams) => Promise<DepositReceipt> {
   return async (params) => {
+    if (params.amount <= 0n) {
+      throw new DarkPoolError("parameter", "deposit amount must be > 0");
+    }
+    if (params.tokenMint.length !== 32) {
+      throw new DarkPoolError("parameter", "tokenMint must be 32 bytes");
+    }
+
     const { masterSeed, spendingKey, ownerBlinding } = await client.getResolvedKeys();
 
-    // Step: fetch current leaf count to derive blinding factor deterministically.
-    const leafIndex = await client.providers.accountInfoProvider
-      .getAccountInfo(client.vaultConfigPda())
-      .then((info) => {
-        if (!info)
-          throw new DarkPoolError("instruction-build", "vault_config not initialised");
-        // Parse leaf_count from the account data — the first 8 bytes after the
-        // 8-byte discriminator + 32 (admin) + 32 (tee_pubkey) = offset 72.
-        const data = info.data;
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        return view.getBigUint64(8 + 32 + 32, true);
-      });
+    // --- Stage: merkle-position-fetch ---
+    await params.callbacks?.pre?.("merkle-position-fetch");
+    const [vaultPda] = vaultConfigPda(client.programId);
+    const info = await client.providers.accountInfoProvider.getAccountInfo(vaultPda);
+    if (!info) {
+      throw new DarkPoolError(
+        "merkle-position-fetch",
+        "vault_config not initialised — deploy/init the program first",
+      );
+    }
+    // VaultConfig layout (offsets after the 8-byte Anchor discriminator):
+    //   admin:      Pubkey        @  8
+    //   tee_pubkey: Pubkey        @ 40
+    //   leaf_count: u64 LE        @ 72
+    const data = info.data;
+    if (data.byteLength < 80) {
+      throw new DarkPoolError(
+        "merkle-position-fetch",
+        `vault_config data too small: ${data.byteLength}`,
+      );
+    }
+    const leafIndex = new DataView(
+      data.buffer,
+      data.byteOffset + 72,
+      8,
+    ).getBigUint64(0, true);
 
+    // --- Stage: note-build ---
+    await params.callbacks?.pre?.("note-build");
     const blindingR = deriveBlindingFactor(masterSeed, leafIndex);
     const owner = await ownerCommitment(spendingKey, ownerBlinding);
+    const nonceBytes = bn254ToBE32(params.nonce);
+    const blindingBytes = bn254ToBE32(blindingR);
+    const ownerBytes = bn254ToBE32(owner);
 
     const commitment = await noteCommitment({
       tokenMint: params.tokenMint,
@@ -63,22 +112,30 @@ export function getDepositFunction(
       blindingR,
     });
 
-    await params.callbacks?.pre?.("deposit-send");
+    // --- Stage: instruction-build ---
+    await params.callbacks?.pre?.("instruction-build");
+    const tokenMintPk = new PublicKey(params.tokenMint);
+    const ix = buildDepositInstruction({
+      programId: client.programId,
+      depositor: params.depositor,
+      tokenMint: tokenMintPk,
+      depositorTokenAccount: params.depositorTokenAccount,
+      tokenProgramId: params.tokenProgramId ?? TOKEN_PROGRAM_ID,
+      amount: params.amount,
+      ownerCommitment: ownerBytes,
+      nonce: nonceBytes,
+      blindingR: blindingBytes,
+    });
 
-    // NB: Full Anchor instruction construction is intentionally left as a
-    // follow-up — Phase 1 tests exercise the program via cargo, not via this
-    // SDK. This stub documents the surface area and wiring.
-    // TODO(phase-1.1): port Anchor `deposit()` ix here using @coral-xyz/anchor.
-    throw new DarkPoolError(
-      "instruction-build",
-      "deposit() SDK path is scaffolded — on-chain tests cover Phase 1. " +
-        "Full SDK transport will land with packages/web-zk-prover integration.",
+    // --- Stage: transaction-send ---
+    await params.callbacks?.pre?.("transaction-send");
+    const signature = await client.providers.transactionForwarder.sendAndConfirm(
+      [ix],
     );
+    await params.callbacks?.post?.("transaction-send", signature);
 
-    // Unreachable but kept for shape:
-    // eslint-disable-next-line no-unreachable
     return {
-      signature: "",
+      signature,
       leafIndex,
       noteCommitment: commitment,
       notePlaintext: {

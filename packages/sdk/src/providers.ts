@@ -1,4 +1,10 @@
-import type { Connection, PublicKey, Transaction, TransactionSignature } from "@solana/web3.js";
+import type {
+  Connection,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+  TransactionSignature,
+} from "@solana/web3.js";
 
 /**
  * Injectable infrastructure dependencies. Each can be swapped for a mock in tests.
@@ -9,7 +15,15 @@ export interface AccountInfoProvider {
 }
 
 export interface TransactionForwarder {
-  sendAndConfirm(tx: Transaction, signers: unknown[]): Promise<TransactionSignature>;
+  /**
+   * Sign (if needed), send, and confirm a transaction. Receives either a
+   * fully constructed `Transaction` or a bare instruction list so the
+   * forwarder can attach its own fee-payer / blockhash / signatures.
+   */
+  sendAndConfirm(
+    txOrIxs: Transaction | TransactionInstruction[],
+    signers?: unknown[],
+  ): Promise<TransactionSignature>;
 }
 
 export interface MerkleProofProvider {

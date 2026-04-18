@@ -19,4 +19,7 @@ pub enum CryptoError {
 
     #[error("amount too large to fit in field element")]
     AmountOverflow,
+
+    #[error("AEAD error: {0}")]
+    Aead(String),
 }

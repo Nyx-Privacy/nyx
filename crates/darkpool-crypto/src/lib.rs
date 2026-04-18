@@ -26,6 +26,8 @@ pub mod poseidon;
 #[cfg(not(target_os = "solana"))]
 pub mod keys;
 #[cfg(not(target_os = "solana"))]
+pub mod user_commitment;
+#[cfg(not(target_os = "solana"))]
 pub mod viewing_keys;
 
 pub use errors::CryptoError;
@@ -39,4 +41,9 @@ pub use note::{Note, NoteCommitment, NOTE_COMMITMENT_BYTES};
 pub use nullifier::{nullifier, Nullifier, NULLIFIER_BYTES};
 pub use poseidon::{poseidon_hash, poseidon_hash_bytes};
 #[cfg(not(target_os = "solana"))]
-pub use viewing_keys::{derive_monthly_viewing_key, derive_viewing_key_for_pair};
+pub use user_commitment::{user_commitment_from_keys, UserCommitmentInputs};
+#[cfg(not(target_os = "solana"))]
+pub use viewing_keys::{
+    derive_monthly_viewing_key, derive_scope_aead_key, derive_viewing_key_for_pair,
+    scope_aead_decrypt, scope_aead_encrypt,
+};
