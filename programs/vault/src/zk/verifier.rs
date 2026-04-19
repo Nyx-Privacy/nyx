@@ -45,14 +45,9 @@ pub fn verify_groth16_proof<const NR: usize>(
     proof: &Groth16Proof,
     public_inputs: &[[u8; 32]; NR],
 ) -> Result<()> {
-    let mut verifier = Groth16Verifier::new(
-        &proof.pi_a,
-        &proof.pi_b,
-        &proof.pi_c,
-        public_inputs,
-        vk,
-    )
-    .map_err(|_| error!(VaultError::InvalidProof))?;
+    let mut verifier =
+        Groth16Verifier::new(&proof.pi_a, &proof.pi_b, &proof.pi_c, public_inputs, vk)
+            .map_err(|_| error!(VaultError::InvalidProof))?;
 
     verifier
         .verify()

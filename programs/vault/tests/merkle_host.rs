@@ -12,6 +12,7 @@ fn fresh_config() -> VaultConfig {
     VaultConfig {
         admin: Default::default(),
         tee_pubkey: Default::default(),
+        root_key: Default::default(),
         leaf_count: 0,
         current_root: empty_root(&zeros).unwrap(),
         roots: [[0u8; 32]; ROOT_HISTORY_SIZE],

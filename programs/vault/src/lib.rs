@@ -26,6 +26,7 @@ pub use instructions::deposit;
 pub use instructions::initialize;
 pub use instructions::lock_note;
 pub use instructions::release_lock;
+pub use instructions::rotate_root_key;
 pub use instructions::tee_forced_settle;
 pub use instructions::withdraw;
 
@@ -39,8 +40,18 @@ pub mod vault {
     use super::*;
 
     /// Initialize the global `VaultConfig` singleton. One-time setup.
-    pub fn initialize(ctx: Context<Initialize>, tee_pubkey: Pubkey) -> Result<()> {
-        initialize::initialize_handler(ctx, tee_pubkey)
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        tee_pubkey: Pubkey,
+        root_key: Pubkey,
+    ) -> Result<()> {
+        initialize::initialize_handler(ctx, tee_pubkey, root_key)
+    }
+
+    /// Rotate the Permission Group root key. Must be signed by the current
+    /// root key (self-signature model — admin cannot override).
+    pub fn rotate_root_key(ctx: Context<RotateRootKey>, new_root_key: Pubkey) -> Result<()> {
+        rotate_root_key::rotate_root_key_handler(ctx, new_root_key)
     }
 
     /// Register a User Commitment via VALID_WALLET_CREATE proof.
@@ -86,10 +97,7 @@ pub mod vault {
     }
 
     /// Release an expired note lock.
-    pub fn release_lock(
-        ctx: Context<ReleaseLock>,
-        note_commitment: [u8; 32],
-    ) -> Result<()> {
+    pub fn release_lock(ctx: Context<ReleaseLock>, note_commitment: [u8; 32]) -> Result<()> {
         release_lock::release_lock_handler(ctx, note_commitment)
     }
 

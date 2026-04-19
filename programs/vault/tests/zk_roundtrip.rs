@@ -16,8 +16,8 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use darkpool_crypto::field::fr_from_uniform_bytes;
 use darkpool_crypto::poseidon::poseidon_hash;
-use vault::zk::verify_groth16_proof;
 use vault::zk::verifier::{make_vk, Groth16Proof};
+use vault::zk::verify_groth16_proof;
 use vault::zk::vk_valid_wallet_create::*;
 
 fn repo_root() -> PathBuf {

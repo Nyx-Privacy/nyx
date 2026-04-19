@@ -26,11 +26,11 @@ import { anchorDiscriminator, vaultConfigPda } from "../src/idl/vault-client.js"
 
 const PROGRAM_ID = new PublicKey("3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb");
 
-/** Build a VaultConfig-shaped buffer with `leafCount` at offset 72. */
+/** Build a VaultConfig-shaped buffer with `leafCount` at offset 104. */
 function fakeVaultConfigData(leafCount: bigint): Buffer {
-  // 8 (disc) + 32 (admin) + 32 (tee) + 8 (leaf_count) + 32 (current_root) = 112 min
-  const b = Buffer.alloc(256, 0);
-  b.writeBigUInt64LE(leafCount, 72);
+  // 8 (disc) + 32 (admin) + 32 (tee) + 32 (root_key) + 8 (leaf_count) + ...
+  const b = Buffer.alloc(320, 0);
+  b.writeBigUInt64LE(leafCount, 104);
   return b;
 }
 

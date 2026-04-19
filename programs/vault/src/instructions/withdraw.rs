@@ -1,8 +1,6 @@
 use crate::errors::VaultError;
 use crate::state::*;
-use crate::zk::{
-    verifier::make_vk, verify_groth16_proof, vk_valid_spend::*, Groth16Proof,
-};
+use crate::zk::{verifier::make_vk, verify_groth16_proof, vk_valid_spend::*, Groth16Proof};
 use anchor_lang::prelude::*;
 use anchor_spl::token::{transfer_checked, Mint, Token, TokenAccount, TransferChecked};
 use core::mem::size_of;
@@ -123,7 +121,10 @@ pub fn withdraw_handler(
 
     // ----- Merkle root must be recent -----
     require!(
-        ctx.accounts.vault_config.load()?.contains_root(&merkle_root),
+        ctx.accounts
+            .vault_config
+            .load()?
+            .contains_root(&merkle_root),
         VaultError::StaleMerkleRoot
     );
 
@@ -131,13 +132,7 @@ pub fn withdraw_handler(
     // VALID_SPEND public inputs: [merkleRoot, nullifier, tokenMint[0], tokenMint[1], amount]
     let mint_bytes = ctx.accounts.token_mint.key().to_bytes();
     let [mint_lo, mint_hi] = pubkey_pair_be32(&mint_bytes);
-    let public_inputs: [[u8; 32]; 5] = [
-        merkle_root,
-        nullifier,
-        mint_lo,
-        mint_hi,
-        u64_be32(amount),
-    ];
+    let public_inputs: [[u8; 32]; 5] = [merkle_root, nullifier, mint_lo, mint_hi, u64_be32(amount)];
 
     let vk = make_vk(
         &VALID_SPEND_ALPHA_G1,

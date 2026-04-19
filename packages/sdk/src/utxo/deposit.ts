@@ -80,11 +80,12 @@ export function getDepositFunction(
       );
     }
     // VaultConfig layout (offsets after the 8-byte Anchor discriminator):
-    //   admin:      Pubkey        @  8
-    //   tee_pubkey: Pubkey        @ 40
-    //   leaf_count: u64 LE        @ 72
+    //   admin:      Pubkey        @   8
+    //   tee_pubkey: Pubkey        @  40
+    //   root_key:   Pubkey        @  72
+    //   leaf_count: u64 LE        @ 104
     const data = info.data;
-    if (data.byteLength < 80) {
+    if (data.byteLength < 112) {
       throw new DarkPoolError(
         "merkle-position-fetch",
         `vault_config data too small: ${data.byteLength}`,
@@ -92,7 +93,7 @@ export function getDepositFunction(
     }
     const leafIndex = new DataView(
       data.buffer,
-      data.byteOffset + 72,
+      data.byteOffset + 104,
       8,
     ).getBigUint64(0, true);
 

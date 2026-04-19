@@ -1,8 +1,6 @@
 use crate::errors::VaultError;
 use crate::state::*;
-use crate::zk::{
-    verifier::make_vk, verify_groth16_proof, vk_valid_wallet_create::*, Groth16Proof,
-};
+use crate::zk::{verifier::make_vk, verify_groth16_proof, vk_valid_wallet_create::*, Groth16Proof};
 use anchor_lang::prelude::*;
 use core::mem::size_of;
 

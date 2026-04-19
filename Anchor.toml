@@ -4,9 +4,11 @@ skip-lint = false
 
 [programs.localnet]
 vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+matching_engine = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K"
 
 [programs.devnet]
 vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+matching_engine = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K"
 
 [registry]
 url = "https://api.apr.dev"
@@ -22,4 +24,4 @@ test = "echo 'use cargo test + npm test'"
 url = "https://api.devnet.solana.com"
 
 [workspace]
-members = ["programs/vault"]
+members = ["programs/vault", "programs/matching_engine"]

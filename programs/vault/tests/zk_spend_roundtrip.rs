@@ -25,8 +25,8 @@ use darkpool_crypto::field::{fr_from_uniform_bytes, fr_to_be_bytes, pubkey_to_fr
 use darkpool_crypto::poseidon::poseidon_hash;
 use vault::merkle::{append_leaf, compute_zero_subtree_roots, empty_root};
 use vault::state::{VaultConfig, MERKLE_DEPTH, ROOT_HISTORY_SIZE};
-use vault::zk::verify_groth16_proof;
 use vault::zk::verifier::{make_vk, Groth16Proof};
+use vault::zk::verify_groth16_proof;
 use vault::zk::vk_valid_spend::*;
 
 const TREE_DEPTH: usize = 20;
@@ -77,6 +77,7 @@ fn fresh_config() -> VaultConfig {
     VaultConfig {
         admin: Default::default(),
         tee_pubkey: Default::default(),
+        root_key: Default::default(),
         leaf_count: 0,
         current_root: empty_root(&zeros).unwrap(),
         roots: [[0u8; 32]; ROOT_HISTORY_SIZE],
@@ -90,10 +91,7 @@ fn fresh_config() -> VaultConfig {
 
 /// Build a Merkle inclusion proof for `leaf_index` in a tree populated with `leaves`.
 /// Returns (siblings, path_indices, root).
-fn merkle_witness(
-    leaves: &[[u8; 32]],
-    target_index: usize,
-) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32]) {
+fn merkle_witness(leaves: &[[u8; 32]], target_index: usize) -> (Vec<[u8; 32]>, Vec<u8>, [u8; 32]) {
     assert!(target_index < leaves.len());
 
     // Level 0 = leaves, padded with zero-subtree roots.
@@ -171,13 +169,19 @@ fn valid_spend_roundtrip() {
 
     let spending_key = fr_from_uniform_bytes(&[0x41u8; 32]);
     let owner_commit_blinding = fr_from_uniform_bytes(&[0x42u8; 32]);
-    let owner_commitment =
-        poseidon_hash(&[spending_key, owner_commit_blinding]).unwrap();
+    let owner_commitment = poseidon_hash(&[spending_key, owner_commit_blinding]).unwrap();
     let nonce = fr_from_uniform_bytes(&[0x43u8; 32]);
     let blinding_r = fr_from_uniform_bytes(&[0x44u8; 32]);
 
-    let note_commitment =
-        poseidon_hash(&[mint_lo, mint_hi, amount_fr, owner_commitment, nonce, blinding_r]).unwrap();
+    let note_commitment = poseidon_hash(&[
+        mint_lo,
+        mint_hi,
+        amount_fr,
+        owner_commitment,
+        nonce,
+        blinding_r,
+    ])
+    .unwrap();
     let note_commitment_bytes = fr_to_be_bytes(&note_commitment);
 
     // ----- Build an on-chain-style Merkle tree with this as the only leaf -----
@@ -185,8 +189,7 @@ fn valid_spend_roundtrip() {
     let root_bytes = append_leaf(&mut cfg, note_commitment_bytes).unwrap();
 
     // Build the matching inclusion witness.
-    let (siblings, path_indices, witness_root) =
-        merkle_witness(&[note_commitment_bytes], 0);
+    let (siblings, path_indices, witness_root) = merkle_witness(&[note_commitment_bytes], 0);
     assert_eq!(
         witness_root, root_bytes,
         "merkle_witness root does not match on-chain append root — \

@@ -18,10 +18,7 @@ pub struct ReleaseLock<'info> {
     pub note_lock: AccountLoader<'info, NoteLock>,
 }
 
-pub fn release_lock_handler(
-    ctx: Context<ReleaseLock>,
-    _note_commitment: [u8; 32],
-) -> Result<()> {
+pub fn release_lock_handler(ctx: Context<ReleaseLock>, _note_commitment: [u8; 32]) -> Result<()> {
     let lock = ctx.accounts.note_lock.load()?;
     let clock = Clock::get()?;
     require!(clock.slot >= lock.expiry_slot, VaultError::LockNotExpired);

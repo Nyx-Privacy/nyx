@@ -65,6 +65,7 @@ struct RawGroth16Proof {
 #[derive(BorshSerialize)]
 struct InitializeArgs {
     tee_pubkey: [u8; 32],
+    root_key: [u8; 32],
 }
 
 fn vault_config_pda(program_id: &Pubkey) -> (Pubkey, u8) {
@@ -88,12 +89,15 @@ fn test_user_commitment_registration() {
     // --- Set up LiteSVM + funded admin + program ---
     let mut svm = LiteSVM::new();
     let program_id: Pubkey = VAULT_PROGRAM_ID_BYTES.parse().expect("program id");
-    svm.add_program_from_file(program_id, &program_path).expect("load program");
+    svm.add_program_from_file(program_id, &program_path)
+        .expect("load program");
 
     let admin = Keypair::new();
-    svm.airdrop(&admin.pubkey(), 1_000_000_000).expect("airdrop admin");
+    svm.airdrop(&admin.pubkey(), 1_000_000_000)
+        .expect("airdrop admin");
 
     let tee_kp = Keypair::new();
+    let root_kp = Keypair::new();
 
     // --- Call `initialize` ---
     let (vault_pda, _bump) = vault_config_pda(&program_id);
@@ -101,6 +105,7 @@ fn test_user_commitment_registration() {
     let mut init_data = common::anchor_disc("initialize").to_vec();
     let init_args = InitializeArgs {
         tee_pubkey: tee_kp.pubkey().to_bytes(),
+        root_key: root_kp.pubkey().to_bytes(),
     };
     init_args.serialize(&mut init_data).unwrap();
 
@@ -209,7 +214,9 @@ fn test_user_commitment_registration() {
     result.expect("create_wallet failed");
 
     // --- Verify on-chain WalletEntry has the correct commitment ---
-    let acct = svm.get_account(&wallet_pda).expect("wallet_entry must exist");
+    let acct = svm
+        .get_account(&wallet_pda)
+        .expect("wallet_entry must exist");
     assert!(
         acct.data.len() >= 8 + 32,
         "wallet entry account too small: {}",

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "programs/vault",
+    "programs/matching_engine",
     "crates/darkpool-crypto",
 ]
 exclude = [

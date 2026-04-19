@@ -135,19 +135,48 @@ export interface BuildInitializeParams {
   programId: PublicKey;
   admin: PublicKey;
   teePubkey: PublicKey;
+  rootKey: PublicKey;
 }
 
 export function buildInitializeInstruction(
   p: BuildInitializeParams,
 ): TransactionInstruction {
   const [vaultPda] = vaultConfigPda(p.programId);
-  const data = cat(anchorDiscriminator("initialize"), p.teePubkey.toBytes());
+  const data = cat(
+    anchorDiscriminator("initialize"),
+    p.teePubkey.toBytes(),
+    p.rootKey.toBytes(),
+  );
   return new TransactionInstruction({
     programId: p.programId,
     keys: [
       { pubkey: p.admin, isSigner: true, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+export interface BuildRotateRootKeyParams {
+  programId: PublicKey;
+  currentRootKey: PublicKey;
+  newRootKey: PublicKey;
+}
+
+export function buildRotateRootKeyInstruction(
+  p: BuildRotateRootKeyParams,
+): TransactionInstruction {
+  const [vaultPda] = vaultConfigPda(p.programId);
+  const data = cat(
+    anchorDiscriminator("rotate_root_key"),
+    p.newRootKey.toBytes(),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.currentRootKey, isSigner: true, isWritable: false },
+      { pubkey: vaultPda, isSigner: false, isWritable: true },
     ],
     data: Buffer.from(data),
   });

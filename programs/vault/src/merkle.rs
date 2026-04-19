@@ -34,10 +34,9 @@ pub fn poseidon2(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
 
     #[cfg(not(target_os = "solana"))]
     {
-    let mut h = Poseidon::<Fr>::new_circom(2)
-        .map_err(|_| error!(VaultError::InvalidProof))?;
-    h.hash_bytes_be(&[left.as_slice(), right.as_slice()])
-        .map_err(|_| error!(VaultError::InvalidProof))
+        let mut h = Poseidon::<Fr>::new_circom(2).map_err(|_| error!(VaultError::InvalidProof))?;
+        h.hash_bytes_be(&[left.as_slice(), right.as_slice()])
+            .map_err(|_| error!(VaultError::InvalidProof))
     }
 }
 
@@ -62,10 +61,7 @@ pub fn empty_root(zero_subtree_roots: &[[u8; 32]; MERKLE_DEPTH as usize]) -> Res
 
 /// Append a leaf to the tree and return the new root.
 /// Updates `right_path` in-place.
-pub fn append_leaf(
-    vault: &mut VaultConfig,
-    leaf: [u8; 32],
-) -> Result<[u8; 32]> {
+pub fn append_leaf(vault: &mut VaultConfig, leaf: [u8; 32]) -> Result<[u8; 32]> {
     let leaf_index = vault.leaf_count;
     require!(
         leaf_index < (1u64 << MERKLE_DEPTH),

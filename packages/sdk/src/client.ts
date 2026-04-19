@@ -14,9 +14,12 @@ import {
   resolveMasterSeed,
 } from "./keys/key-generators.js";
 import type { IDarkPoolZkProverSuite } from "./zk/prover-suite.js";
+import { consumedNotePda, noteLockPda } from "./idl/vault-client.js";
 
 export interface DarkPoolClientConfig {
   programId: PublicKey;
+  /** Matching-engine program id. Optional for pre-Phase-3 flows (deposit/withdraw). */
+  matchingEngineProgramId?: PublicKey;
   seedMode: MasterSeedMode;
   tradingOffset?: bigint;
   connectionProvider: SolanaConnectionProvider;
@@ -31,8 +34,15 @@ export interface DarkPoolClientConfig {
   ownerCommitmentBlinding: bigint;
 }
 
+export type NoteStatus = "active" | "locked" | "consumed" | "unknown";
+
+export interface NoteStatusInfo {
+  status: NoteStatus;
+}
+
 export class DarkPoolClient {
   readonly programId: PublicKey;
+  readonly matchingEngineProgramId: PublicKey | undefined;
   readonly connectionProvider: SolanaConnectionProvider;
   readonly providers: DarkPoolClientConfig["providers"];
   readonly zkProver: IDarkPoolZkProverSuite;
@@ -43,6 +53,7 @@ export class DarkPoolClient {
 
   constructor(cfg: DarkPoolClientConfig) {
     this.programId = cfg.programId;
+    this.matchingEngineProgramId = cfg.matchingEngineProgramId;
     this.connectionProvider = cfg.connectionProvider;
     this.providers = cfg.providers;
     this.zkProver = cfg.zkProver;
@@ -75,6 +86,29 @@ export class DarkPoolClient {
       tradingKey: deriveTradingKeyAtOffset(this.resolvedSeed, this.tradingOffset),
       ownerBlinding: this.ownerBlinding,
     };
+  }
+
+  /**
+   * Return the current lifecycle state of a UTXO note.
+   *   - "consumed" — a ConsumedNote PDA exists (already settled).
+   *   - "locked"   — a NoteLock PDA exists but ConsumedNote does not.
+   *   - "active"   — neither PDA exists. Safe to use for a new order.
+   *   - "unknown"  — RPC read failed. Caller should retry or abort.
+   */
+  async getNoteStatus(noteCommitment: Uint8Array): Promise<NoteStatusInfo> {
+    try {
+      const [consumed] = consumedNotePda(this.programId, noteCommitment);
+      const [locked] = noteLockPda(this.programId, noteCommitment);
+      const consumedInfo =
+        await this.providers.accountInfoProvider.getAccountInfo(consumed);
+      if (consumedInfo !== null) return { status: "consumed" };
+      const lockInfo =
+        await this.providers.accountInfoProvider.getAccountInfo(locked);
+      if (lockInfo !== null) return { status: "locked" };
+      return { status: "active" };
+    } catch {
+      return { status: "unknown" };
+    }
   }
 }
 
