@@ -14,3 +14,4 @@ export const VAULT_TOKEN_SEED = enc("vault_token");
 
 export const DARK_CLOB_SEED = enc("dark_clob");
 export const MATCHING_CONFIG_SEED = enc("matching_config");
+export const BATCH_RESULTS_SEED = enc("batch_results");

@@ -9,7 +9,11 @@
 import { PublicKey, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 
-import { DARK_CLOB_SEED, MATCHING_CONFIG_SEED } from "./seeds.js";
+import {
+  BATCH_RESULTS_SEED,
+  DARK_CLOB_SEED,
+  MATCHING_CONFIG_SEED,
+} from "./seeds.js";
 import { vaultConfigPda, walletEntryPda, noteLockPda, consumedNotePda } from "./vault-client.js";
 
 /** MagicBlock permission program id (see ephemeral-rollups-sdk consts). */
@@ -76,12 +80,35 @@ export function matchingConfigPda(
   );
 }
 
+export function batchResultsPda(
+  programId: PublicKey,
+  market: PublicKey,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [BATCH_RESULTS_SEED, market.toBuffer()],
+    programId,
+  );
+}
+
+/** Order type enum mirroring `ORDER_TYPE_*` in the program. */
+export enum OrderType {
+  Limit = 0,
+  IOC = 1,
+  FOK = 2,
+}
+
 export interface BuildInitMarketParams {
   programId: PublicKey;
   vaultProgramId: PublicKey;
   payer: PublicKey;
   market: PublicKey;
+  baseMint: PublicKey;
+  quoteMint: PublicKey;
+  pythAccount: PublicKey;
   batchIntervalSlots: bigint;
+  circuitBreakerBps: bigint;
+  tickSize: bigint;
+  minOrderSize: bigint;
 }
 
 export function buildInitMarketInstruction(
@@ -90,10 +117,17 @@ export function buildInitMarketInstruction(
   const [vaultCfg] = vaultConfigPda(p.vaultProgramId);
   const [clobPda] = darkClobPda(p.programId, p.market);
   const [matchPda] = matchingConfigPda(p.programId, p.market);
+  const [batchPda] = batchResultsPda(p.programId, p.market);
   const data = cat(
     anchorDiscriminator("init_market"),
     p.market.toBytes(),
+    p.baseMint.toBytes(),
+    p.quoteMint.toBytes(),
+    p.pythAccount.toBytes(),
     u64LE(p.batchIntervalSlots),
+    u64LE(p.circuitBreakerBps),
+    u64LE(p.tickSize),
+    u64LE(p.minOrderSize),
   );
   return new TransactionInstruction({
     programId: p.programId,
@@ -102,6 +136,7 @@ export function buildInitMarketInstruction(
       { pubkey: vaultCfg, isSigner: false, isWritable: false },
       { pubkey: clobPda, isSigner: false, isWritable: true },
       { pubkey: matchPda, isSigner: false, isWritable: true },
+      { pubkey: batchPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(data),
@@ -169,6 +204,10 @@ export interface BuildSubmitOrderParams {
   noteAmount: bigint;
   expirySlot: bigint;
   orderId: Uint8Array; // 16 bytes
+  /** 0 = LIMIT, 1 = IOC, 2 = FOK. Defaults to LIMIT. */
+  orderType?: OrderType;
+  /** Minimum base-unit fill qty. 0 = any fill allowed. Defaults to 0. */
+  minFillQty?: bigint;
 }
 
 export interface SubmitOrderIxAndKeys {
@@ -194,7 +233,8 @@ export function buildSubmitOrderInstruction(
   const [noteLock] = noteLockPda(p.vaultProgramId, p.noteCommitment);
   const [consumedProbe] = consumedNotePda(p.vaultProgramId, p.noteCommitment);
 
-  // Args struct (Borsh, fixed-size fields in declaration order).
+  // Args struct (Borsh, fixed-size fields in declaration order). Must match
+  // `SubmitOrderArgs` in programs/matching_engine/src/instructions/submit_order.rs.
   const argsBytes = cat(
     p.market.toBytes(),
     fixed32(p.noteCommitment),
@@ -204,6 +244,8 @@ export function buildSubmitOrderInstruction(
     u64LE(p.noteAmount),
     u64LE(p.expirySlot),
     fixed16(p.orderId),
+    new Uint8Array([p.orderType ?? OrderType.Limit]),
+    u64LE(p.minFillQty ?? 0n),
   );
 
   const data = cat(anchorDiscriminator("submit_order"), argsBytes);
@@ -234,4 +276,65 @@ export function buildSubmitOrderInstruction(
       tradingKey: p.tradingKey.toBytes(),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// cancel_order (Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface BuildCancelOrderParams {
+  programId: PublicKey;
+  tradingKey: PublicKey;
+  market: PublicKey;
+  orderId: Uint8Array; // 16 bytes
+}
+
+export function buildCancelOrderInstruction(
+  p: BuildCancelOrderParams,
+): TransactionInstruction {
+  const [clobPda] = darkClobPda(p.programId, p.market);
+  const data = cat(
+    anchorDiscriminator("cancel_order"),
+    p.market.toBytes(),
+    fixed16(p.orderId),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.tradingKey, isSigner: true, isWritable: true },
+      { pubkey: clobPda, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// run_batch (Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface BuildRunBatchParams {
+  programId: PublicKey;
+  teeAuthority: PublicKey;
+  market: PublicKey;
+  pythAccount: PublicKey;
+}
+
+export function buildRunBatchInstruction(
+  p: BuildRunBatchParams,
+): TransactionInstruction {
+  const [clobPda] = darkClobPda(p.programId, p.market);
+  const [matchPda] = matchingConfigPda(p.programId, p.market);
+  const [batchPda] = batchResultsPda(p.programId, p.market);
+  const data = cat(anchorDiscriminator("run_batch"), p.market.toBytes());
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.teeAuthority, isSigner: true, isWritable: true },
+      { pubkey: clobPda, isSigner: false, isWritable: true },
+      { pubkey: matchPda, isSigner: false, isWritable: false },
+      { pubkey: batchPda, isSigner: false, isWritable: true },
+      { pubkey: p.pythAccount, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
 }

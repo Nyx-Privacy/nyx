@@ -17,10 +17,14 @@ import { DarkPoolError } from "../errors.js";
 import type { IPerSessionManager } from "../per/session-manager.js";
 import {
   buildSubmitOrderInstruction,
+  OrderType,
   type SubmitOrderIxAndKeys,
 } from "../idl/matching-engine-client.js";
 
 export type OrderSide = "bid" | "ask";
+
+/** Literal aliases for OrderType — lets SDK callers write "limit" | "ioc" | "fok". */
+export type OrderTypeName = "limit" | "ioc" | "fok";
 
 export interface OrderParams {
   /** The Trading Key that signs the submit_order tx. */
@@ -44,7 +48,18 @@ export interface OrderParams {
   expirySlot: bigint;
   /** 16-byte random order id. */
   orderId: Uint8Array;
+  /** LIMIT (rest in book), IOC (cancel unfilled remainder immediately),
+   *  FOK (fill-or-kill). Defaults to LIMIT. */
+  orderType?: OrderTypeName;
+  /** Minimum fill qty in base units. 0 allows any partial fill. Defaults to 0. */
+  minFillQty?: bigint;
 }
+
+const ORDER_TYPE_BY_NAME: Record<OrderTypeName, OrderType> = {
+  limit: OrderType.Limit,
+  ioc: OrderType.IOC,
+  fok: OrderType.FOK,
+};
 
 export interface OrderReceipt {
   signature: TransactionSignature;
@@ -94,6 +109,13 @@ export function getOrderSubmitFunction(
         "parameter",
         "notional (amount * priceLimit) exceeds noteAmount",
       );
+    }
+    const minFillQty = params.minFillQty ?? 0n;
+    if (minFillQty < 0n) {
+      throw new DarkPoolError("parameter", "minFillQty must be >= 0");
+    }
+    if (minFillQty > params.amount) {
+      throw new DarkPoolError("parameter", "minFillQty must be <= amount");
     }
 
     // ----- Stage 1: attestation-verify -----
@@ -152,6 +174,8 @@ export function getOrderSubmitFunction(
         noteAmount: params.noteAmount,
         expirySlot: params.expirySlot,
         orderId: params.orderId,
+        orderType: ORDER_TYPE_BY_NAME[params.orderType ?? "limit"],
+        minFillQty,
       });
     } catch (err) {
       throw new DarkPoolError(

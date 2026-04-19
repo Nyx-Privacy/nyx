@@ -16,3 +16,5 @@ export * from "./client.js";
 export * from "./per/attestation.js";
 export * from "./per/session-manager.js";
 export * from "./orders/submit-order.js";
+export * from "./orders/cancel-order.js";
+export * from "./batch/inclusion-proof.js";

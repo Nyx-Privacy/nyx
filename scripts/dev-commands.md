@@ -183,12 +183,12 @@ cargo test --workspace
 echo "ALL GREEN"
 ```
 
-Expected counts today (Phase 3 complete):
+Expected counts today (Phase 4 complete):
 
 | Layer | Count |
 |-------|-------|
-| Rust workspace tests  | 42 (27 crypto + 2 lib id + 6 merkle + 2 ZK + 1 wallet + 4 matching_engine submit_order) |
-| TypeScript tests      | 33 (24 previous + 9 orders-submit) |
+| Rust workspace tests  | 59 (27 crypto + 2 lib id + 6 merkle + 2 ZK + 1 wallet + 6 matching_engine lib + 4 submit_order + 11 run_batch) |
+| TypeScript tests      | 51 (33 prior + 6 cancel-order + 4 batch-watcher + 8 inclusion-proof) |
 
 ## 9. Phase 3 — MagicBlock PER commands
 
@@ -231,6 +231,68 @@ MagicBlock permission program. Our Rust on-chain program links `ACL...`;
 the TS `permissionPdaFromAccount` helper targets `BTW...`. For correct PDA
 derivation from TS, always derive with the `ACL...` id (see the
 `derivePermissionPda` helper in `tests/orders-submit.devnet.test.ts`).
+
+---
+
+## 10. Phase 4 — batch auction + circuit breaker + cancel
+
+Phase 4 extends the engine with periodic uniform-clearing-price batching,
+Pyth-based circuit breaker, `cancel_order`, and the `BatchResults` match
+ring. All new tests are local (litesvm + vitest mocks); no live TEE needed.
+
+### 10.1 Run only the Phase-4 on-chain tests (litesvm)
+
+```sh
+# Pre-req: SBF binaries must be up to date.
+cargo build-sbf --manifest-path programs/vault/Cargo.toml
+cargo build-sbf --manifest-path programs/matching_engine/Cargo.toml
+
+# 6 lib unit tests (deviation math + merkle helpers)
+cargo test -p matching_engine --lib -- --nocapture
+
+# 11 integration tests (§23.4.2 + cancel flow)
+cargo test -p matching_engine --test run_batch -- --nocapture
+
+# 4 Phase-3 submit_order tests on new Phase-4 layouts (regression gate)
+cargo test -p matching_engine --test submit_order -- --nocapture
+```
+
+### 10.2 Run only the Phase-4 TS glue tests
+
+```sh
+cd packages/sdk && ../../node_modules/.bin/vitest run \
+  tests/cancel-order.test.ts \
+  tests/batch-watcher.test.ts \
+  tests/inclusion-proof.test.ts
+```
+
+### 10.3 Phase-4 devnet redeploy (after ABI change)
+
+`init_market` now takes 8 fields (adds base_mint, quote_mint,
+pyth_account, circuit_breaker_bps, tick_size, min_order_size). The
+`orders-submit.devnet.test.ts` suite passes them with synthetic values —
+`init_market` only persists, it doesn't call the oracle. To redeploy:
+
+```sh
+# Uploads programs/matching_engine/target/deploy/matching_engine.so
+# against AB8ZJYg... + G8MH... (keypairs live in .devnet/keypairs/).
+bash scripts/deploy-devnet.sh
+
+# Then run the regression suite:
+cd packages/sdk && RUN_PER_TESTS=1 \
+  ../../node_modules/.bin/vitest run tests/orders-submit.devnet.test.ts
+```
+
+### 10.4 Shape quick-reference
+
+| Field                        | Old (Phase 3) | New (Phase 4)     |
+|------------------------------|---------------|-------------------|
+| `InitMarketArgs` width       | 40 B          | 168 B             |
+| `SubmitOrderArgs` width      | 113 B         | 122 B             |
+| `OrderRecord` width          | 136 B         | 176 B             |
+| DarkCLOB capacity            | 64 orders     | 48 orders         |
+| New PDAs per market          | dark_clob,    | +batch_results    |
+|                              |  matching_cfg |                   |
 
 ---
 

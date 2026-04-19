@@ -54,6 +54,7 @@ import {
   vaultConfigPda,
 } from "../src/idl/vault-client.js";
 import {
+  batchResultsPda,
   buildInitMarketInstruction,
   buildConfigureAccessInstruction,
   darkClobPda,
@@ -184,7 +185,16 @@ maybeDescribe("phase-3 devnet (RUN_PER_TESTS=1)", () => {
       vaultProgramId: VAULT_PROGRAM_ID,
       payer: admin.publicKey,
       market,
+      // Phase-4 additions — values are deliberately synthetic for devnet.
+      // Use a random placeholder for mint/pyth account pubkeys because we
+      // don't actually dispatch a run_batch here; init_market only stores them.
+      baseMint: Keypair.generate().publicKey,
+      quoteMint: Keypair.generate().publicKey,
+      pythAccount: Keypair.generate().publicKey,
       batchIntervalSlots: 150n,
+      circuitBreakerBps: 300n,
+      tickSize: 1n,
+      minOrderSize: 0n,
     });
     const sig = await sendAndConfirmTransaction(
       connection,
@@ -196,13 +206,17 @@ maybeDescribe("phase-3 devnet (RUN_PER_TESTS=1)", () => {
 
     const [clobPda] = darkClobPda(ME_PROGRAM_ID, market);
     const [matchPda] = matchingConfigPda(ME_PROGRAM_ID, market);
+    const [batchPda] = batchResultsPda(ME_PROGRAM_ID, market);
 
     const clob = await connection.getAccountInfo(clobPda, "confirmed");
     const matchCfg = await connection.getAccountInfo(matchPda, "confirmed");
+    const batch = await connection.getAccountInfo(batchPda, "confirmed");
     expect(clob).not.toBeNull();
     expect(matchCfg).not.toBeNull();
+    expect(batch).not.toBeNull();
     expect(clob!.owner.toBase58()).toBe(ME_PROGRAM_ID.toBase58());
     expect(matchCfg!.owner.toBase58()).toBe(ME_PROGRAM_ID.toBase58());
+    expect(batch!.owner.toBase58()).toBe(ME_PROGRAM_ID.toBase58());
   }, 90_000);
 
   // ----- 3. configure_access CPIs MagicBlock permission program -----
