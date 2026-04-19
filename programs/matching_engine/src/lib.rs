@@ -1,17 +1,23 @@
-//! Nyx dark pool — matching engine program (Phase 3).
+//! Nyx dark pool — matching engine program.
 //!
-//! Responsibilities (Phase 3 scope):
-//!   - DarkCLOB + MatchingConfig PDAs, one per market.
+//! Phase 3 scope (shipped):
+//!   - DarkCLOB + MatchingConfig + BatchResults PDAs per market.
 //!   - Permission Group configuration (root-key-only `configure_access`).
 //!   - Delegation of the DarkCLOB to the MagicBlock ER validator.
-//!   - `submit_order` — TEE-side order ingestion, CPIs `vault::lock_note`.
+//!   - `submit_order` — TEE-side order ingestion + `vault::lock_note` CPI.
 //!
-//! Out of scope (Phase 4+):
-//!   - `run_batch` batch auction + uniform clearing price.
-//!   - MatchResult state + TEE hardware signing.
-//!   - Real BTreeMap-indexed CLOB heap (current fixed-array ring is a stub).
+//! Phase 4 scope (this file):
+//!   - `run_batch` — periodic uniform-clearing-price batch auction with
+//!     Pyth-based circuit breaker.
+//!   - `cancel_order` — user removes their own OrderRecord from the book.
+//!   - BatchResults ring holds MatchResults for Phase 5 settlement pickup.
+//!   - Inclusion-root publishing (spec §20.5 step 75).
 //!
-//! Reference: Section 23.3 of darkpool_protocol_spec_v3_changed.md.
+//! Phase 5+ (future):
+//!   - L1 tee_forced_settle for each MatchResult.
+//!   - VALID_PRICE ZK circuit enforcing clearing price vs oracle bounds.
+//!
+//! Reference: Section 23.3 + 23.4 of darkpool_protocol_spec_v3_changed.md.
 
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::anchor::ephemeral;
@@ -20,9 +26,11 @@ pub mod errors;
 pub mod instructions;
 pub mod state;
 
+pub use instructions::cancel_order;
 pub use instructions::configure_access;
 pub use instructions::delegate_dark_clob;
 pub use instructions::init_market;
+pub use instructions::run_batch;
 pub use instructions::submit_order;
 
 use instructions::*;
@@ -36,10 +44,9 @@ pub mod matching_engine {
 
     pub fn init_market(
         ctx: Context<InitMarket>,
-        market: Pubkey,
-        batch_interval_slots: u64,
+        args: init_market::InitMarketArgs,
     ) -> Result<()> {
-        init_market::init_market_handler(ctx, market, batch_interval_slots)
+        init_market::init_market_handler(ctx, args)
     }
 
     pub fn configure_access(
@@ -60,5 +67,17 @@ pub mod matching_engine {
         args: submit_order::SubmitOrderArgs,
     ) -> Result<()> {
         submit_order::submit_order_handler(ctx, args)
+    }
+
+    pub fn cancel_order(
+        ctx: Context<CancelOrder>,
+        market: Pubkey,
+        order_id: [u8; 16],
+    ) -> Result<()> {
+        cancel_order::cancel_order_handler(ctx, market, order_id)
+    }
+
+    pub fn run_batch(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
+        run_batch::run_batch_handler(ctx, market)
     }
 }

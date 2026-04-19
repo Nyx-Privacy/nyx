@@ -1,10 +1,9 @@
-//! On-PER OrderRecord. Written during `submit_order`, sorted by the batch
-//! auction in Phase 4.
+//! On-PER OrderRecord. Written during `submit_order`, consumed by
+//! `run_batch` in Phase 4.
 //!
-//! Precedence anchor: `seq_no` is assigned monotonically inside the TEE at the
-//! moment `submit_order` is handled, not at L1 PDA init time. Two orders at
-//! the same price_limit tie-break on `seq_no` (oldest-first). `arrival_slot`
-//! is recorded separately for expiry math and censorship audits.
+//! Layout is zero-copy POD — no enums, no Option<_>, only fixed-width ints
+//! and byte arrays. Any new field MUST preserve the `#[repr(C)]` invariant
+//! and MUST keep total size a multiple of 8.
 
 use anchor_lang::prelude::*;
 
@@ -12,28 +11,57 @@ use anchor_lang::prelude::*;
 #[derive(Default, Debug)]
 #[repr(C)]
 pub struct OrderRecord {
+    /// Monotonic per-market counter. Precedence tie-breaker at equal
+    /// price_limit. Assigned by TEE at `submit_order` arrival time.
     pub seq_no: u64,
-    pub trading_key: Pubkey,
-    pub note_commitment: [u8; 32],
-    /// Identifier chosen by TEE — returned to user so they can audit inclusion
-    /// against the batch `order_inclusion_root` published per Section 20.5.
-    pub order_inclusion_commitment: [u8; 32],
-    /// Price limit (base units per quote unit, in the market's native tick).
-    pub price_limit: u64,
-    pub amount: u64,
     /// Slot number when the TEE accepted the order.
     pub arrival_slot: u64,
-    /// Side of the order: 0 = bid (buy), 1 = ask (sell).
+    /// Slot at which the lock auto-expires (see Phase 4 drain logic).
+    pub expiry_slot: u64,
+    /// Price limit in the market's native tick (base units per quote unit).
+    pub price_limit: u64,
+    /// Size (base units).
+    pub amount: u64,
+    /// Minimum fill qty (base units). 0 = any fill allowed.
+    /// Phase 4 rejects partial matches smaller than this.
+    pub min_fill_qty: u64,
+
+    pub trading_key: Pubkey,
+    pub note_commitment: [u8; 32],
+    /// `SHA-256(seq_no || note_commitment || trading_key)` — surfaced back
+    /// to the user for censorship audits and the batch Merkle inclusion root.
+    pub order_inclusion_commitment: [u8; 32],
+    /// Caller-supplied 16-byte id. Used for `cancel_order` lookups and
+    /// vault NoteLock derivation.
+    pub order_id: [u8; 16],
+
+    /// 0 = bid (buy), 1 = ask (sell).
     pub side: u8,
-    /// 0 = empty slot, 1 = active, 2 = filled, 3 = expired.
+    /// 0 = empty, 1 = active, 2 = filled, 3 = expired, 4 = cancelled.
     pub status: u8,
-    pub _padding: [u8; 6],
+    /// 0 = LIMIT (rest in book), 1 = IOC (cancel unfilled remainder
+    /// immediately), 2 = FOK (fill-or-kill — reject if full size not
+    /// matchable this batch).
+    pub order_type: u8,
+    pub _padding: [u8; 5],
 }
 
 pub const ORDER_STATUS_EMPTY: u8 = 0;
 pub const ORDER_STATUS_ACTIVE: u8 = 1;
 pub const ORDER_STATUS_FILLED: u8 = 2;
 pub const ORDER_STATUS_EXPIRED: u8 = 3;
+pub const ORDER_STATUS_CANCELLED: u8 = 4;
 
 pub const ORDER_SIDE_BID: u8 = 0;
 pub const ORDER_SIDE_ASK: u8 = 1;
+
+pub const ORDER_TYPE_LIMIT: u8 = 0;
+pub const ORDER_TYPE_IOC: u8 = 1;
+pub const ORDER_TYPE_FOK: u8 = 2;
+
+impl OrderRecord {
+    /// Is this slot currently matchable?
+    pub fn is_matchable(&self, now_slot: u64) -> bool {
+        self.status == ORDER_STATUS_ACTIVE && now_slot < self.expiry_slot
+    }
+}

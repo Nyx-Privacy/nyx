@@ -1,36 +1,35 @@
 //! On-PER DarkCLOB. Single PDA per market, delegated once at `init_market`
 //! and never undelegated in normal operation.
 //!
-//! **Phase 3 stub:** this is a fixed-capacity ring of OrderRecords. The real
-//! BTreeMap<price, VecDeque<OrderRecord>> zero-copy heap lands in Phase 4
-//! alongside `run_batch`. Phase 3 only needs:
-//!   - a PDA exists on-chain,
-//!   - the PDA is delegated to the ER validator,
-//!   - `next_seq` counter advances monotonically per `submit_order`,
-//!   - inserted orders are retrievable (for tests asserting state).
+//! **Storage model.** The spec mental-model is
+//! `BTreeMap<price, VecDeque<OrderRecord>>`. Our concrete layout is a
+//! fixed-capacity array of OrderRecords; `run_batch` pulls active orders
+//! into two temporary arrays (bids / asks) and sorts them in-function.
+//! For `DARK_CLOB_CAPACITY ≤ 64` this is trivially within a single ix's
+//! compute budget, and keeps the account layout zero-copy.
 //!
-//! `DARK_CLOB_CAPACITY` is deliberately small (128) — enough to exercise
-//! every Phase 3 test path but not so large that the account rent is painful.
+//! Phase 4 bump: the per-order struct grew from 136 to 176 bytes, so we
+//! dropped capacity from 64 to 48 to stay under the 10240-byte Anchor
+//! init-CPI realloc limit.
 
 use anchor_lang::prelude::*;
 
 use crate::state::order_record::OrderRecord;
 
-/// Phase 3 capacity. Kept small because Anchor's `init` constraint does a
-/// realloc CPI whose limit is 10240 bytes on the inner-ix path. Phase 4's
-/// real BTreeMap-heap DarkCLOB uses a proper multi-page allocation strategy.
-pub const DARK_CLOB_CAPACITY: usize = 64;
+/// Order slots per market. Phase-4 bumped down from 64 to fit the wider
+/// OrderRecord layout under the 10 240-byte realloc cap.
+pub const DARK_CLOB_CAPACITY: usize = 48;
 
 #[account(zero_copy)]
 #[repr(C)]
 pub struct DarkCLOB {
     pub market: Pubkey,
-    /// Monotonically increasing counter assigned to each accepted order.
-    /// Used as the precedence tie-breaker — Phase 4 sorts by (price, seq_no).
+    /// Monotonic order counter.
     pub next_seq: u64,
-    /// Number of non-empty slots in `orders`. Kept in sync with status != EMPTY.
+    /// Number of slots with `status != EMPTY`.
     pub order_count: u64,
-    /// Fixed-capacity order ring. Real price-indexed heap replaces this in Phase 4.
+    /// Fixed-capacity order storage. Real price-indexed heap deferred to
+    /// Phase 5; Phase 4 sorts at batch time.
     pub orders: [OrderRecord; DARK_CLOB_CAPACITY],
     pub bump: u8,
     pub _padding: [u8; 7],
@@ -39,8 +38,13 @@ pub struct DarkCLOB {
 impl DarkCLOB {
     pub const SEED: &'static [u8] = b"dark_clob";
 
-    /// Find the first empty slot index. Returns `None` if the book is full.
     pub fn find_empty_slot(&self) -> Option<usize> {
         self.orders.iter().position(|o| o.status == 0)
+    }
+
+    pub fn find_by_order_id(&self, trading_key: &Pubkey, order_id: &[u8; 16]) -> Option<usize> {
+        self.orders.iter().position(|o| {
+            o.status != 0 && o.trading_key == *trading_key && o.order_id == *order_id
+        })
     }
 }

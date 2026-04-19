@@ -39,6 +39,7 @@ use vault::state::VaultConfig;
 use crate::errors::MatchingError;
 use crate::state::{
     DarkCLOB, MatchingConfig, OrderRecord, ORDER_SIDE_ASK, ORDER_SIDE_BID, ORDER_STATUS_ACTIVE,
+    ORDER_TYPE_FOK, ORDER_TYPE_IOC, ORDER_TYPE_LIMIT,
 };
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug)]
@@ -48,18 +49,13 @@ pub struct SubmitOrderArgs {
     pub amount: u64,
     pub price_limit: u64,
     pub side: u8,
-    /// Upper bound on the amount encoded in the note (amount × price_limit
-    /// must not exceed this). Caller supplies this; the TEE re-derives and
-    /// checks against the note plaintext in Phase 4 when note decryption is
-    /// wired. For Phase 3 this is the authoritative cap.
     pub note_amount: u64,
-    /// Slot at which the lock expires. Must exceed current slot + a small
-    /// safety margin to survive batch auction latency.
     pub expiry_slot: u64,
-    /// 16-byte order id chosen by caller (random). Used as the `order_id` on
-    /// the vault's NoteLock PDA so multiple orders against different notes
-    /// can coexist.
     pub order_id: [u8; 16],
+    /// 0 = LIMIT, 1 = IOC, 2 = FOK.
+    pub order_type: u8,
+    /// 0 = any fill allowed.
+    pub min_fill_qty: u64,
 }
 
 #[derive(Accounts)]
@@ -127,8 +123,26 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
         args.side == ORDER_SIDE_BID || args.side == ORDER_SIDE_ASK,
         MatchingError::InvalidSide
     );
+    require!(
+        args.order_type == ORDER_TYPE_LIMIT
+            || args.order_type == ORDER_TYPE_IOC
+            || args.order_type == ORDER_TYPE_FOK,
+        MatchingError::InvalidOrderType
+    );
     require!(args.amount > 0, MatchingError::ZeroAmount);
     require!(args.price_limit > 0, MatchingError::ZeroPrice);
+
+    // min_fill_qty must not exceed amount (silly orders rejected at ingress).
+    require!(
+        args.min_fill_qty <= args.amount,
+        MatchingError::AmountBelowMinOrderSize
+    );
+
+    // Expiry must be in the future.
+    {
+        let now = Clock::get()?.slot;
+        require!(args.expiry_slot > now, MatchingError::ExpiryInPast);
+    }
 
     // Notional check: amount × price_limit ≤ note_amount.
     let notional = (args.amount as u128)
@@ -139,10 +153,17 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
         MatchingError::NotionalExceedsNoteValue
     );
 
-    // --- Market consistency ---
+    // --- Market consistency + min_order_size gate ---
     {
         let clob = ctx.accounts.dark_clob.load()?;
         require!(clob.market == args.market, MatchingError::MarketMismatch);
+    }
+    {
+        let cfg = ctx.accounts.matching_config.load()?;
+        require!(
+            cfg.min_order_size == 0 || args.amount >= cfg.min_order_size,
+            MatchingError::AmountBelowMinOrderSize
+        );
     }
 
     // --- Consumed-note probe ---
@@ -218,15 +239,19 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
 
         let rec = OrderRecord {
             seq_no,
+            arrival_slot,
+            expiry_slot: args.expiry_slot,
+            price_limit: args.price_limit,
+            amount: args.amount,
+            min_fill_qty: args.min_fill_qty,
             trading_key: ctx.accounts.trading_key.key(),
             note_commitment: args.note_commitment,
             order_inclusion_commitment: inclusion_commitment,
-            price_limit: args.price_limit,
-            amount: args.amount,
-            arrival_slot,
+            order_id: args.order_id,
             side: args.side,
             status: ORDER_STATUS_ACTIVE,
-            _padding: [0u8; 6],
+            order_type: args.order_type,
+            _padding: [0u8; 5],
         };
         clob.orders[slot] = rec;
         clob.order_count = clob.order_count.saturating_add(1);
