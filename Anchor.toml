@@ -3,11 +3,11 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+vault = "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW"
 matching_engine = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K"
 
 [programs.devnet]
-vault = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb"
+vault = "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW"
 matching_engine = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K"
 
 [registry]

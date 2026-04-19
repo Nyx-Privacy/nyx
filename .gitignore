@@ -26,6 +26,10 @@ dist/
 *-keypair.json
 tests/fixtures/wallets/*.json
 
+# Devnet test fixtures (generated + funded locally; never committed)
+.devnet/
+!.devnet/README.md
+
 # Circom build artifacts (generated)
 circuits/build/
 circuits/**/*.r1cs

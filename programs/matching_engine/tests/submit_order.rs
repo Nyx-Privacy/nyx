@@ -27,7 +27,7 @@ use solana_transaction::Transaction;
 type Pubkey = Address;
 const SYSTEM_PROGRAM_ID: Pubkey = solana_system_interface::program::ID;
 
-const VAULT_PROGRAM_ID: &str = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb";
+const VAULT_PROGRAM_ID: &str = "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW";
 const ME_PROGRAM_ID: &str = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K";
 
 #[derive(BorshSerialize)]

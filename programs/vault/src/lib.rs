@@ -33,7 +33,7 @@ pub use instructions::withdraw;
 use instructions::*;
 use zk::Groth16Proof;
 
-declare_id!("3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb");
+declare_id!("AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW");
 
 #[program]
 pub mod vault {

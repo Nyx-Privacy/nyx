@@ -41,7 +41,7 @@ type Pubkey = Address;
 const SYSTEM_PROGRAM_ID: Pubkey = solana_system_interface::program::ID;
 
 // Must match `declare_id!` in programs/vault/src/lib.rs.
-const VAULT_PROGRAM_ID_BYTES: &str = "3S14CmmNb3bpGb68ukNFjFxxsLSpUijMfXaBJssBFRDb";
+const VAULT_PROGRAM_ID_BYTES: &str = "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW";
 
 fn program_so_path() -> PathBuf {
     common::repo_root().join("target/deploy/vault.so")

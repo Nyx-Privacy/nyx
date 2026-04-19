@@ -192,25 +192,45 @@ Expected counts today (Phase 3 complete):
 
 ## 9. Phase 3 — MagicBlock PER commands
 
+### 9.1 Standalone / mock (no network)
+
 ```sh
-# Run only the Phase 3 on-chain tests
+# Run only the Phase 3 on-chain tests (litesvm + mock TEE server)
 cargo test -p matching_engine --test submit_order -- --nocapture
 
 # Run only the Phase 3 TS tests (mock TEE)
 cd packages/sdk && ../../node_modules/.bin/vitest run tests/orders-submit.test.ts
-
-# Run against real MagicBlock devnet TEE (requires tee.magicblock.app credentials)
-# (current path: set up your .env.devnet, deploy vault + matching_engine, then:)
-cd packages/sdk && RUN_PER_TESTS=1 \
-  PER_RPC_URL="https://tee.magicblock.app" \
-  ../../node_modules/.bin/vitest run tests/orders-submit.test.ts
-
-# MagicBlock permission program id (reference, do not change):
-# ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1
-
-# Matching engine program id (from target/deploy/matching_engine-keypair.json):
-# G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K
 ```
+
+### 9.2 Live devnet (RUN_PER_TESTS=1)
+
+```sh
+# one-time bootstrap:
+bash scripts/setup-devnet.sh     # generates + funds .devnet/keypairs/*
+bash scripts/deploy-devnet.sh    # deploys vault.so + matching_engine.so
+
+# run the devnet E2E suite
+cd packages/sdk && RUN_PER_TESTS=1 \
+  ../../node_modules/.bin/vitest run tests/orders-submit.devnet.test.ts
+```
+
+### 9.3 Reference constants
+
+| Thing                                       | Value                                          |
+|---------------------------------------------|------------------------------------------------|
+| Vault program id                            | AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW   |
+| Matching-engine program id                  | G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K   |
+| Permission program id (ER SDK 0.10.5 Rust)  | ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1   |
+| Permission program id (ER SDK 0.6.5 TS)     | BTWAqWNBmF2TboMh3fxMJfgR16xGHYD7Kgr2dPwbRPBi   |
+| TEE endpoint                                | https://tee.magicblock.app                     |
+| Env file (gitignored)                       | packages/sdk/.env.devnet                       |
+| Test keypair dir (gitignored)               | .devnet/keypairs/                              |
+
+Note: the two permission program ids are different versions of the same
+MagicBlock permission program. Our Rust on-chain program links `ACL...`;
+the TS `permissionPdaFromAccount` helper targets `BTW...`. For correct PDA
+derivation from TS, always derive with the `ACL...` id (see the
+`derivePermissionPda` helper in `tests/orders-submit.devnet.test.ts`).
 
 ---
 
