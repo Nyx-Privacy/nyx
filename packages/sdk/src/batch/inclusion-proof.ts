@@ -100,22 +100,68 @@ export function verifyInclusionPath(
 /** Matches `BATCH_RESULTS_CAPACITY` in batch_results.rs. */
 export const BATCH_RESULTS_CAPACITY = 16;
 
+/** Number of `FeeAccumulator` slots on `BatchResults` (base + quote). */
+export const FEE_ACCUMULATOR_COUNT = 2;
+
+/** Size (bytes) of a single `FeeAccumulator`. Keep in sync with
+ *  `fee_accumulator.rs`: 32 mint + 8 accumulated + 8 batch_slot + 32 flushed = 80. */
+export const FEE_ACCUMULATOR_SIZE = 80;
+
 /** Size (bytes) of a single MatchResult in the results ring. Keep in sync
- *  with match_result.rs: 32+32+32+32+8+8+8+8+8+8+1+7 = 184. */
-export const MATCH_RESULT_SIZE = 184;
+ *  with match_result.rs (Phase 5):
+ *    32 note_buyer + 32 note_seller + 32 note_e + 32 note_f
+ *    + 32 owner_buyer + 32 owner_seller
+ *    + 32 user_commitment_buyer + 32 user_commitment_seller
+ *    + 8 buyer_note_value + 8 seller_note_value
+ *    + 8 base_amt + 8 quote_amt
+ *    + 8 buyer_change_amt + 8 seller_change_amt
+ *    + 8 buyer_fee_amt + 8 seller_fee_amt
+ *    + 16 buyer_relock_oid + 8 buyer_relock_expiry
+ *    + 16 seller_relock_oid + 8 seller_relock_expiry
+ *    + 8 price + 8 pyth_at_match + 8 batch_slot
+ *    + 8 match_id + 1 status + 7 padding
+ *    = 408. */
+export const MATCH_RESULT_SIZE = 408;
+
+/** All-zero 16-byte sentinel: `submit_order` rejects zero order-ids so this
+ *  cannot collide with a legitimate active order. */
+export const RELOCK_ORDER_ID_NONE = new Uint8Array(16);
 
 export interface MatchResultRecord {
   noteBuyer: Uint8Array;
   noteSeller: Uint8Array;
+  /** Buyer change-note commitment (Poseidon). All-zero = exact fill. */
+  noteEcommitment: Uint8Array;
+  /** Seller change-note commitment. All-zero = exact fill. */
+  noteFcommitment: Uint8Array;
   ownerBuyer: Uint8Array;
   ownerSeller: Uint8Array;
+  userCommitmentBuyer: Uint8Array;
+  userCommitmentSeller: Uint8Array;
+  buyerNoteValue: bigint;
+  sellerNoteValue: bigint;
   baseAmt: bigint;
   quoteAmt: bigint;
+  buyerChangeAmt: bigint;
+  sellerChangeAmt: bigint;
+  buyerFeeAmt: bigint;
+  sellerFeeAmt: bigint;
+  buyerRelockOrderId: Uint8Array;
+  buyerRelockExpiry: bigint;
+  sellerRelockOrderId: Uint8Array;
+  sellerRelockExpiry: bigint;
   price: bigint;
   pythAtMatch: bigint;
   batchSlot: bigint;
   matchId: bigint;
   status: number;
+}
+
+export interface FeeAccumulatorRecord {
+  tokenMint: Uint8Array;
+  accumulatedFees: bigint;
+  batchSlot: bigint;
+  flushedCommitment: Uint8Array;
 }
 
 export interface BatchResultsView {
@@ -129,6 +175,7 @@ export interface BatchResultsView {
   writeCursor: bigint;
   nextMatchId: bigint;
   results: MatchResultRecord[];
+  feeAccumulators: FeeAccumulatorRecord[];
   bump: number;
 }
 
@@ -150,40 +197,66 @@ function copyBytes(src: Uint8Array): Uint8Array {
 }
 
 function decodeMatchResult(buf: Uint8Array, off: number): MatchResultRecord {
-  const noteBuyer = readBytes(buf, off, 32);
-  off += 32;
-  const noteSeller = readBytes(buf, off, 32);
-  off += 32;
-  const ownerBuyer = readBytes(buf, off, 32);
-  off += 32;
-  const ownerSeller = readBytes(buf, off, 32);
-  off += 32;
-  const baseAmt = readU64(buf, off);
-  off += 8;
-  const quoteAmt = readU64(buf, off);
-  off += 8;
-  const price = readU64(buf, off);
-  off += 8;
-  const pythAtMatch = readU64(buf, off);
-  off += 8;
-  const batchSlot = readU64(buf, off);
-  off += 8;
-  const matchId = readU64(buf, off);
-  off += 8;
+  const noteBuyer = readBytes(buf, off, 32); off += 32;
+  const noteSeller = readBytes(buf, off, 32); off += 32;
+  const noteEcommitment = readBytes(buf, off, 32); off += 32;
+  const noteFcommitment = readBytes(buf, off, 32); off += 32;
+  const ownerBuyer = readBytes(buf, off, 32); off += 32;
+  const ownerSeller = readBytes(buf, off, 32); off += 32;
+  const userCommitmentBuyer = readBytes(buf, off, 32); off += 32;
+  const userCommitmentSeller = readBytes(buf, off, 32); off += 32;
+  const buyerNoteValue = readU64(buf, off); off += 8;
+  const sellerNoteValue = readU64(buf, off); off += 8;
+  const baseAmt = readU64(buf, off); off += 8;
+  const quoteAmt = readU64(buf, off); off += 8;
+  const buyerChangeAmt = readU64(buf, off); off += 8;
+  const sellerChangeAmt = readU64(buf, off); off += 8;
+  const buyerFeeAmt = readU64(buf, off); off += 8;
+  const sellerFeeAmt = readU64(buf, off); off += 8;
+  const buyerRelockOrderId = readBytes(buf, off, 16); off += 16;
+  const buyerRelockExpiry = readU64(buf, off); off += 8;
+  const sellerRelockOrderId = readBytes(buf, off, 16); off += 16;
+  const sellerRelockExpiry = readU64(buf, off); off += 8;
+  const price = readU64(buf, off); off += 8;
+  const pythAtMatch = readU64(buf, off); off += 8;
+  const batchSlot = readU64(buf, off); off += 8;
+  const matchId = readU64(buf, off); off += 8;
   const status = buf[off];
   return {
     noteBuyer,
     noteSeller,
+    noteEcommitment,
+    noteFcommitment,
     ownerBuyer,
     ownerSeller,
+    userCommitmentBuyer,
+    userCommitmentSeller,
+    buyerNoteValue,
+    sellerNoteValue,
     baseAmt,
     quoteAmt,
+    buyerChangeAmt,
+    sellerChangeAmt,
+    buyerFeeAmt,
+    sellerFeeAmt,
+    buyerRelockOrderId,
+    buyerRelockExpiry,
+    sellerRelockOrderId,
+    sellerRelockExpiry,
     price,
     pythAtMatch,
     batchSlot,
     matchId,
     status,
   };
+}
+
+function decodeFeeAccumulator(buf: Uint8Array, off: number): FeeAccumulatorRecord {
+  const tokenMint = readBytes(buf, off, 32); off += 32;
+  const accumulatedFees = readU64(buf, off); off += 8;
+  const batchSlot = readU64(buf, off); off += 8;
+  const flushedCommitment = readBytes(buf, off, 32);
+  return { tokenMint, accumulatedFees, batchSlot, flushedCommitment };
 }
 
 /** Decode the raw account.data (including 8-byte anchor discriminator) into
@@ -195,20 +268,21 @@ export function decodeBatchResults(accountData: Uint8Array): BatchResultsView {
   //         + 8 write_cursor + 8 next_match_id
   //         + results[] + 1 bump + 7 pad
   const expected =
-    8 +
-    32 +
-    32 +
-    8 +
-    8 +
-    8 +
-    8 +
-    1 +
-    7 +
-    8 +
-    8 +
+    8 +   // disc
+    32 +  // market
+    32 +  // inclusion_root
+    8 +   // last_batch_slot
+    8 +   // last_match_count
+    8 +   // last_clearing_price
+    8 +   // last_pyth_twap
+    1 +   // cb
+    7 +   // padding_a
+    8 +   // write_cursor
+    8 +   // next_match_id
     MATCH_RESULT_SIZE * BATCH_RESULTS_CAPACITY +
-    1 +
-    7;
+    FEE_ACCUMULATOR_SIZE * FEE_ACCUMULATOR_COUNT +
+    1 +   // bump
+    7;    // padding_b
   if (accountData.length !== expected) {
     throw new Error(
       `batch_results length mismatch: got ${accountData.length}, expected ${expected}`,
@@ -238,6 +312,11 @@ export function decodeBatchResults(accountData: Uint8Array): BatchResultsView {
     results.push(decodeMatchResult(accountData, off));
     off += MATCH_RESULT_SIZE;
   }
+  const feeAccumulators: FeeAccumulatorRecord[] = [];
+  for (let i = 0; i < FEE_ACCUMULATOR_COUNT; i++) {
+    feeAccumulators.push(decodeFeeAccumulator(accountData, off));
+    off += FEE_ACCUMULATOR_SIZE;
+  }
   const bump = accountData[off];
   return {
     market,
@@ -250,6 +329,7 @@ export function decodeBatchResults(accountData: Uint8Array): BatchResultsView {
     writeCursor,
     nextMatchId,
     results,
+    feeAccumulators,
     bump,
   };
 }

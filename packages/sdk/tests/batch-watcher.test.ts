@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   BATCH_RESULTS_CAPACITY,
+  FEE_ACCUMULATOR_COUNT,
+  FEE_ACCUMULATOR_SIZE,
   MATCH_RESULT_SIZE,
   decodeBatchResults,
   type MatchResultRecord,
@@ -64,6 +66,7 @@ function synthesizeAccount(opts: {
     8 + // write cursor
     8 + // next match id
     MATCH_RESULT_SIZE * BATCH_RESULTS_CAPACITY +
+    FEE_ACCUMULATOR_SIZE * FEE_ACCUMULATOR_COUNT +
     1 + // bump
     7; // padding_b
   const buf = new Uint8Array(fullLen);
@@ -91,20 +94,38 @@ function synthesizeAccount(opts: {
   for (let i = 0; i < BATCH_RESULTS_CAPACITY; i++) {
     const m = opts.matches[i];
     if (m) {
-      writeBytes(buf, off, m.noteBuyer);
-      writeBytes(buf, off + 32, m.noteSeller);
-      writeBytes(buf, off + 64, m.ownerBuyer);
-      writeBytes(buf, off + 96, m.ownerSeller);
-      writeU64LE(buf, off + 128, m.baseAmt);
-      writeU64LE(buf, off + 136, m.quoteAmt);
-      writeU64LE(buf, off + 144, m.price);
-      writeU64LE(buf, off + 152, m.pythAtMatch);
-      writeU64LE(buf, off + 160, m.batchSlot);
-      writeU64LE(buf, off + 168, m.matchId);
-      buf[off + 176] = m.status;
+      let mo = off;
+      writeBytes(buf, mo, m.noteBuyer); mo += 32;
+      writeBytes(buf, mo, m.noteSeller); mo += 32;
+      writeBytes(buf, mo, m.noteEcommitment); mo += 32;
+      writeBytes(buf, mo, m.noteFcommitment); mo += 32;
+      writeBytes(buf, mo, m.ownerBuyer); mo += 32;
+      writeBytes(buf, mo, m.ownerSeller); mo += 32;
+      writeBytes(buf, mo, m.userCommitmentBuyer); mo += 32;
+      writeBytes(buf, mo, m.userCommitmentSeller); mo += 32;
+      writeU64LE(buf, mo, m.buyerNoteValue); mo += 8;
+      writeU64LE(buf, mo, m.sellerNoteValue); mo += 8;
+      writeU64LE(buf, mo, m.baseAmt); mo += 8;
+      writeU64LE(buf, mo, m.quoteAmt); mo += 8;
+      writeU64LE(buf, mo, m.buyerChangeAmt); mo += 8;
+      writeU64LE(buf, mo, m.sellerChangeAmt); mo += 8;
+      writeU64LE(buf, mo, m.buyerFeeAmt); mo += 8;
+      writeU64LE(buf, mo, m.sellerFeeAmt); mo += 8;
+      writeBytes(buf, mo, m.buyerRelockOrderId); mo += 16;
+      writeU64LE(buf, mo, m.buyerRelockExpiry); mo += 8;
+      writeBytes(buf, mo, m.sellerRelockOrderId); mo += 16;
+      writeU64LE(buf, mo, m.sellerRelockExpiry); mo += 8;
+      writeU64LE(buf, mo, m.price); mo += 8;
+      writeU64LE(buf, mo, m.pythAtMatch); mo += 8;
+      writeU64LE(buf, mo, m.batchSlot); mo += 8;
+      writeU64LE(buf, mo, m.matchId); mo += 8;
+      buf[mo] = m.status;
     }
     off += MATCH_RESULT_SIZE;
   }
+  // Zero fee_accumulators — they live inline after results. The decoder
+  // reads them; tests that want non-zero accumulators can write them directly.
+  off += FEE_ACCUMULATOR_SIZE * FEE_ACCUMULATOR_COUNT;
   buf[off] = opts.bump;
   return buf;
 }
@@ -144,10 +165,24 @@ describe("Phase 4 — BatchResults decoder", () => {
     const fakeMatch: MatchResultRecord = {
       noteBuyer: filled32(1),
       noteSeller: filled32(2),
+      noteEcommitment: filled32(0),
+      noteFcommitment: filled32(0),
       ownerBuyer: filled32(3),
       ownerSeller: filled32(4),
+      userCommitmentBuyer: filled32(5),
+      userCommitmentSeller: filled32(6),
+      buyerNoteValue: 14_600n,
+      sellerNoteValue: 100n,
       baseAmt: 100n,
       quoteAmt: 14_600n,
+      buyerChangeAmt: 0n,
+      sellerChangeAmt: 0n,
+      buyerFeeAmt: 0n,
+      sellerFeeAmt: 0n,
+      buyerRelockOrderId: new Uint8Array(16),
+      buyerRelockExpiry: 0n,
+      sellerRelockOrderId: new Uint8Array(16),
+      sellerRelockExpiry: 0n,
       price: 146n,
       pythAtMatch: 150n,
       batchSlot: 99n,
@@ -180,8 +215,72 @@ describe("Phase 4 — BatchResults decoder", () => {
     expect(m.batchSlot).toBe(99n);
     expect(m.matchId).toBe(17n);
     expect(m.status).toBe(1);
+    expect(m.buyerNoteValue).toBe(14_600n);
+    expect(m.sellerNoteValue).toBe(100n);
+    expect(m.buyerChangeAmt).toBe(0n);
+    expect(m.sellerChangeAmt).toBe(0n);
+    expect(m.buyerFeeAmt).toBe(0n);
+    expect(m.sellerFeeAmt).toBe(0n);
+    expect(m.noteEcommitment).toEqual(filled32(0));
+    expect(m.noteFcommitment).toEqual(filled32(0));
     // Slot 1 is empty (status=0).
     expect(view.results[1].status).toBe(0);
+    // Fee accumulators default to zero.
+    expect(view.feeAccumulators.length).toBe(FEE_ACCUMULATOR_COUNT);
+    expect(view.feeAccumulators[0].accumulatedFees).toBe(0n);
+    expect(view.feeAccumulators[0].flushedCommitment).toEqual(filled32(0));
+  });
+
+  it("[decode_match_result_phase5_partial_fill_with_fees] carries change + fee + relock fields", () => {
+    const fakeMatch: MatchResultRecord = {
+      noteBuyer: filled32(0xA1),
+      noteSeller: filled32(0xB1),
+      noteEcommitment: filled32(0xE1),
+      noteFcommitment: filled32(0),
+      ownerBuyer: filled32(0x11),
+      ownerSeller: filled32(0x22),
+      userCommitmentBuyer: filled32(0x33),
+      userCommitmentSeller: filled32(0x44),
+      buyerNoteValue: 10_000n,
+      sellerNoteValue: 100n,
+      baseAmt: 50n,
+      quoteAmt: 5_000n,
+      buyerChangeAmt: 4_970n,
+      sellerChangeAmt: 0n,
+      buyerFeeAmt: 30n,
+      sellerFeeAmt: 0n,
+      buyerRelockOrderId: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+      buyerRelockExpiry: 9_999n,
+      sellerRelockOrderId: new Uint8Array(16),
+      sellerRelockExpiry: 0n,
+      price: 100n,
+      pythAtMatch: 101n,
+      batchSlot: 123n,
+      matchId: 7n,
+      status: 1,
+    };
+    const raw = synthesizeAccount({
+      market: filled32(0),
+      lastInclusionRoot: filled32(0),
+      lastBatchSlot: 0n,
+      lastMatchCount: 1n,
+      lastClearingPrice: 100n,
+      lastPythTwap: 101n,
+      lastCircuitBreakerTripped: false,
+      writeCursor: 1n,
+      nextMatchId: 8n,
+      matches: [fakeMatch],
+      bump: 253,
+    });
+    const view = decodeBatchResults(raw);
+    const m = view.results[0];
+    expect(m.buyerChangeAmt).toBe(4_970n);
+    expect(m.buyerFeeAmt).toBe(30n);
+    expect(m.noteEcommitment).toEqual(filled32(0xE1));
+    expect(m.noteFcommitment).toEqual(filled32(0));
+    expect(m.buyerRelockExpiry).toBe(9_999n);
+    expect(m.buyerRelockOrderId[0]).toBe(1);
+    expect(m.buyerRelockOrderId[15]).toBe(16);
   });
 
   it("[decode_cb_tripped_batch] circuit-breaker flag decodes true", () => {

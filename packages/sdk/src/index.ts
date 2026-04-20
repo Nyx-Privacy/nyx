@@ -18,3 +18,5 @@ export * from "./per/session-manager.js";
 export * from "./orders/submit-order.js";
 export * from "./orders/cancel-order.js";
 export * from "./batch/inclusion-proof.js";
+export * from "./settlement/settle-builder.js";
+export * from "./settlement/settlement-watcher.js";

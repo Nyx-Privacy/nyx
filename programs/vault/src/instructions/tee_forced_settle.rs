@@ -162,6 +162,14 @@ pub struct TeeForcedSettle<'info> {
     #[account(mut)]
     pub note_lock_f: UncheckedAccount<'info>,
 
+    /// Phase-5: Instructions sysvar. The handler inspects this account to
+    /// prove the tx includes a valid Ed25519Program precompile ix signed
+    /// by `vault_config.tee_pubkey` over `SHA-256(MatchResultPayload)`.
+    /// The sysvar address is hard-coded — Anchor enforces it.
+    /// CHECK: Address validated via `address = sysvar_id()`.
+    #[account(address = solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -170,13 +178,26 @@ pub fn tee_forced_settle_handler(
     payload: MatchResultPayload,
 ) -> Result<()> {
     let clock = Clock::get()?;
-    {
+    let tee_pubkey = {
         let cfg = ctx.accounts.vault_config.load()?;
         require!(
             ctx.accounts.tee_authority.key() == cfg.tee_pubkey,
             VaultError::Unauthorized
         );
-    }
+        cfg.tee_pubkey
+    };
+
+    // Phase-5: verify the TEE's Ed25519 signature over the canonical
+    // payload hash via the Solana Ed25519Program precompile. We search
+    // the transaction's instructions for a matching precompile ix and
+    // assert its (pubkey, msg) tuple. The precompile already checked the
+    // signature bytes for us — our job is to bind that check to our
+    // expected key + message.
+    verify_tee_signature(
+        &ctx.accounts.instructions_sysvar,
+        &tee_pubkey,
+        &canonical_payload_hash(&payload),
+    )?;
     {
         let lock_a = ctx.accounts.note_lock_a.load()?;
         let lock_b = ctx.accounts.note_lock_b.load()?;
@@ -442,4 +463,187 @@ pub struct TradeSettled {
     pub buyer_relock_active: bool,
     pub seller_relock_active: bool,
     pub new_root: [u8; 32],
+}
+
+/// Canonical 32-byte hash of a [`MatchResultPayload`] used as the TEE's
+/// signed message. Fields are concatenated in struct order and hashed via
+/// SHA-256 so that a cross-environment signer (Rust TEE, TS client) can
+/// produce byte-identical output.
+pub fn canonical_payload_hash(p: &MatchResultPayload) -> [u8; 32] {
+    use solana_program::hash::hashv;
+    let base = p.base_amount.to_le_bytes();
+    let quote = p.quote_amount.to_le_bytes();
+    let buyer_change = p.buyer_change_amt.to_le_bytes();
+    let seller_change = p.seller_change_amt.to_le_bytes();
+    let buyer_fee = p.buyer_fee_amt.to_le_bytes();
+    let seller_fee = p.seller_fee_amt.to_le_bytes();
+    let buyer_relock_exp = p.buyer_relock_expiry.to_le_bytes();
+    let seller_relock_exp = p.seller_relock_expiry.to_le_bytes();
+    let price = p.clearing_price.to_le_bytes();
+    let slot = p.batch_slot.to_le_bytes();
+    hashv(&[
+        b"nyx-match-v5",
+        p.match_id.as_ref(),
+        p.note_a_commitment.as_ref(),
+        p.note_b_commitment.as_ref(),
+        p.note_c_commitment.as_ref(),
+        p.note_d_commitment.as_ref(),
+        p.note_e_commitment.as_ref(),
+        p.note_f_commitment.as_ref(),
+        p.note_fee_commitment.as_ref(),
+        p.nullifier_a.as_ref(),
+        p.nullifier_b.as_ref(),
+        p.order_id_a.as_ref(),
+        p.order_id_b.as_ref(),
+        &base,
+        &quote,
+        &buyer_change,
+        &seller_change,
+        &buyer_fee,
+        &seller_fee,
+        p.buyer_relock_order_id.as_ref(),
+        &buyer_relock_exp,
+        p.seller_relock_order_id.as_ref(),
+        &seller_relock_exp,
+        &price,
+        &slot,
+    ])
+    .to_bytes()
+}
+
+/// The Solana Ed25519Program precompile id.
+fn ed25519_program_id() -> Pubkey {
+    solana_program::ed25519_program::ID
+}
+
+/// Scan the tx's instructions list for an Ed25519Program precompile ix
+/// whose (pubkey, msg) matches our expectations. Fails with
+/// `InvalidTeeSignature` otherwise.
+///
+/// Precompile ix data layout (per Solana docs):
+///   offset 0     : u8  num_signatures (we require exactly 1)
+///   offset 1     : u8  padding
+///   offset 2..4  : u16 signature_offset
+///   offset 4..6  : u16 signature_instruction_index
+///   offset 6..8  : u16 public_key_offset
+///   offset 8..10 : u16 public_key_instruction_index
+///   offset 10..12: u16 message_data_offset
+///   offset 12..14: u16 message_data_size
+///   offset 14..16: u16 message_instruction_index
+///
+/// `*_instruction_index == 0xFFFF` means "same instruction" (data inlined).
+/// We only accept the inlined form — cross-ix lookups are not worth the
+/// complexity and a well-behaved relayer always inlines.
+pub fn verify_tee_signature(
+    instructions_sysvar: &UncheckedAccount<'_>,
+    expected_pubkey: &Pubkey,
+    expected_msg: &[u8; 32],
+) -> Result<()> {
+    use solana_program::sysvar::instructions::{
+        load_current_index_checked, load_instruction_at_checked,
+    };
+
+    let ai = instructions_sysvar.to_account_info();
+    let current_ix_idx = load_current_index_checked(&ai)
+        .map_err(|_| error!(VaultError::InvalidTeeSignature))?;
+
+    // Walk every instruction in the tx except ourselves, looking for a
+    // single Ed25519Program precompile entry with matching (pk, msg).
+    for i in 0..current_ix_idx as usize + 8 {
+        // Ceiling: `load_instruction_at_checked` returns Err past the
+        // last ix; break when we go OOB.
+        let ix = match load_instruction_at_checked(i, &ai) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        if ix.program_id != ed25519_program_id() {
+            continue;
+        }
+        if ix.data.len() < 16 {
+            continue;
+        }
+        let num_sigs = ix.data[0];
+        if num_sigs != 1 {
+            continue;
+        }
+        let pk_off = u16::from_le_bytes([ix.data[6], ix.data[7]]) as usize;
+        let pk_ix_idx = u16::from_le_bytes([ix.data[8], ix.data[9]]);
+        let msg_off = u16::from_le_bytes([ix.data[10], ix.data[11]]) as usize;
+        let msg_len = u16::from_le_bytes([ix.data[12], ix.data[13]]) as usize;
+        let msg_ix_idx = u16::from_le_bytes([ix.data[14], ix.data[15]]);
+        // We only accept inlined pk/msg (index == u16::MAX).
+        if pk_ix_idx != u16::MAX || msg_ix_idx != u16::MAX {
+            continue;
+        }
+        if pk_off + 32 > ix.data.len() || msg_off + msg_len > ix.data.len() {
+            continue;
+        }
+        let pk_bytes = &ix.data[pk_off..pk_off + 32];
+        let msg_bytes = &ix.data[msg_off..msg_off + msg_len];
+        if pk_bytes != expected_pubkey.as_ref() {
+            continue;
+        }
+        if msg_len != 32 || msg_bytes != expected_msg {
+            continue;
+        }
+        // Precompile already verified the signature bytes against this
+        // (pk, msg) pair or the tx would have failed before reaching us.
+        return Ok(());
+    }
+    Err(error!(VaultError::InvalidTeeSignature))
+}
+
+#[cfg(test)]
+#[cfg(not(target_os = "solana"))]
+mod tests {
+    use super::*;
+
+    /// Fixed-input canonical hash. Any byte drift here means the TS
+    /// `canonicalPayloadHash` + the in-TEE signer diverged from the
+    /// on-chain verifier and every settlement would start failing —
+    /// catch it at compile time.
+    #[test]
+    fn canonical_payload_hash_fixed_vector() {
+        let p = MatchResultPayload {
+            match_id: [0x11u8; 16],
+            note_a_commitment: [0xA1u8; 32],
+            note_b_commitment: [0xB1u8; 32],
+            note_c_commitment: [0xC1u8; 32],
+            note_d_commitment: [0xD1u8; 32],
+            note_e_commitment: [0u8; 32],
+            note_f_commitment: [0u8; 32],
+            nullifier_a: [0xEAu8; 32],
+            nullifier_b: [0xEBu8; 32],
+            order_id_a: [0x01u8; 16],
+            order_id_b: [0x02u8; 16],
+            base_amount: 100,
+            quote_amount: 5_000,
+            buyer_change_amt: 0,
+            seller_change_amt: 0,
+            buyer_fee_amt: 0,
+            seller_fee_amt: 0,
+            note_fee_commitment: [0u8; 32],
+            buyer_relock_order_id: [0u8; 16],
+            buyer_relock_expiry: 0,
+            seller_relock_order_id: [0u8; 16],
+            seller_relock_expiry: 0,
+            clearing_price: 0,
+            batch_slot: 0,
+        };
+        let hash = canonical_payload_hash(&p);
+        // Keep in sync with packages/sdk/tests/settle-builder.test.ts
+        // `[hash_cross_env_parity]`. When the payload shape changes, update
+        // BOTH sides — any divergence breaks the TEE signature verification.
+        let expected: [u8; 32] = [
+            0x03, 0x88, 0xE8, 0x01, 0x83, 0x01, 0x59, 0x29, 0x83, 0xB8, 0x6C, 0xBC, 0x2F, 0xB7,
+            0x96, 0x76, 0x57, 0x6C, 0x04, 0xC1, 0xA4, 0xB8, 0xAD, 0x79, 0x26, 0x15, 0xCA, 0x63,
+            0xFC, 0xE7, 0x1F, 0x92,
+        ];
+        if hash != expected {
+            panic!(
+                "canonical_payload_hash drifted — got {:02X?}",
+                hash
+            );
+        }
+    }
 }

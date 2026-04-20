@@ -344,3 +344,123 @@ rm -rf node_modules packages/sdk/dist packages/sdk/node_modules circuits/build
 cargo clean -p vault -p darkpool-crypto
 rm -rf packages/sdk/dist target/deploy/vault.so
 ```
+
+---
+
+## 9. Phase 5 — end-to-end devnet trade + settle flow (manual)
+
+### Prerequisites
+- Vault + matching_engine deployed and initialised on devnet (see §3).
+- TEE Ed25519 keypair on a HSM/enclave; public key matches
+  `vault_config.tee_pubkey`.
+- Two funded user keypairs (Alice = buyer, Bob = seller) each with a
+  registered WalletEntry and a funded deposit.
+
+### Step 1 — deposit + lock notes for both sides
+```sh
+# Alice deposits 100 USDC, producing note_a (Poseidon commitment).
+scripts/deposit.sh alice 100000000 <usdc-mint>
+# Bob deposits 10 SOL, producing note_b.
+scripts/deposit.sh bob 10000000000 <sol-mint>
+```
+
+### Step 2 — TEE relayer locks both notes
+Inside the ER validator (TEE), the matching engine's `submit_order` CPI
+into vault `lock_note` writes one `NoteLock { amount, order_id, expiry }`
+PDA per side. Trigger via:
+```sh
+npx tsx scripts/submit-order.ts --side buy  --amount 50 --price 100 --user alice
+npx tsx scripts/submit-order.ts --side sell --amount 50 --price 100 --user bob
+```
+
+### Step 3 — run_batch (inside ER) emits MatchResult + fee note flush
+```sh
+# When a crossing is found, run_batch writes:
+#   - One MatchResult per crossing into BatchResults ring.
+#   - One Poseidon fee-note commitment per mint into fee_accumulators.
+npx tsx scripts/run-batch.ts --market <market-pubkey>
+```
+
+### Step 4 — L1 settlement via `tee_forced_settle`
+The relayer fetches the MatchResult from `BatchResults`, constructs a
+`MatchResultPayload`, signs `canonicalPayloadHash(payload)` inside the
+TEE, and submits a 3-ix tx on devnet:
+
+1. `ComputeBudget::SetComputeUnitLimit(1_400_000)`
+2. `Ed25519Program::verify` with inline (pubkey, signature, msg_hash)
+3. `vault::tee_forced_settle(payload)`
+
+```ts
+// scripts/settle.ts
+import {
+  buildEd25519VerifyIx,
+  buildSettleIx,
+  canonicalPayloadHash,
+  exactFillPayload,
+} from "@nyx/sdk";
+
+const payload = exactFillPayload({ /* from MatchResult */ });
+// Partial fill → mutate:
+//   payload.buyerChangeAmt = 50n;
+//   payload.noteEcommitment = buyerChangeNotePoseidon;
+//   payload.buyerRelockOrderId = alice.orderId;
+//   payload.buyerRelockExpiry = slot + 200n;
+// Fee flush → mutate:
+//   payload.buyerFeeAmt = feeBuyer; payload.sellerFeeAmt = feeSeller;
+//   payload.noteFeeCommitment = feeNotePoseidon;
+
+const msg = canonicalPayloadHash(payload);
+const sig = await teeSign(msg); // HSM / enclave
+
+const tx = new Transaction().add(
+  ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+  buildEd25519VerifyIx({ teePubkey: teePk.toBytes(), signature: sig, message: msg }),
+  buildSettleIx({ programId: VAULT_ID, teeAuthority: teePk, payload }),
+);
+await provider.sendAndConfirm(tx, [teeKeypair]);
+```
+
+Watch the `TradeSettled` event and project it per side with
+`buyerNotification()` / `sellerNotification()` from `@nyx/sdk`.
+
+### Step 5 — withdraw trade legs (exact-fill case)
+```sh
+npx tsx scripts/withdraw.ts --user alice --note note_c --amount 50
+npx tsx scripts/withdraw.ts --user bob   --note note_d --amount 50
+```
+
+### Step 6 — withdraw protocol fees
+After a batch flushes a fee note:
+```sh
+npx tsx scripts/withdraw.ts --user protocol --note note_fee --amount <fee_total>
+```
+
+### E2E scenarios to cover manually on devnet
+| Scenario                                              | Assertion                                      |
+| ----------------------------------------------------- | ---------------------------------------------- |
+| exact-fill + fee flush + both sides withdraw          | vault token balances conserved (incl. fees)    |
+| partial-fill w/ buyer re-lock                         | batch N+1 fills residual from note_e; MatchResult.filledQuantity evolves |
+| both-sides partial with two change notes              | 4 output notes appended (c/d/e/f); 2 continuing re-locks active |
+| circuit breaker trip                                  | fee_accumulators.flushed_commitment stays zero |
+| expired re-lock                                       | `release_lock(note_e)` succeeds after expiry   |
+| cancel mid-fill                                       | collateral NoteLock released; next run_batch drops the order |
+| double-spend attempt (same nullifiers, new payload)   | tx fails on nullifier PDA init                 |
+| tampered Ed25519 signature                            | `InvalidTeeSignature` error; no state mutation |
+
+---
+
+## 10. Phase 5 — local Rust settlement tests
+
+All 15 settlement scenarios (including Ed25519 negative paths + fee-note
+cases) live in `programs/matching_engine/tests/settle.rs`:
+
+```sh
+cargo test -p matching_engine --test settle -- --nocapture
+```
+
+Cross-environment canonical-hash parity:
+```sh
+cargo test -p vault canonical_payload_hash_fixed_vector
+```
++ the matching TS expectation in
+`packages/sdk/tests/settle-builder.test.ts::[hash_cross_env_parity]`.

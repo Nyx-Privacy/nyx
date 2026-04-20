@@ -44,6 +44,18 @@ pub fn anchor_disc(name: &str) -> [u8; 8] {
     d
 }
 
+/// Anchor account discriminator = first 8 bytes of sha256("account:<TypeName>").
+pub fn anchor_acct_disc(name: &str) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"account:");
+    h.update(name.as_bytes());
+    let out = h.finalize();
+    let mut d = [0u8; 8];
+    d.copy_from_slice(&out[..8]);
+    d
+}
+
 // ============================================================================
 // Ix arg structs
 // ============================================================================
@@ -113,6 +125,10 @@ pub fn note_lock_pda(program_id: &Pubkey, commitment: &[u8; 32]) -> (Pubkey, u8)
 
 pub fn consumed_note_pda(program_id: &Pubkey, commitment: &[u8; 32]) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"consumed_note", commitment.as_ref()], program_id)
+}
+
+pub fn nullifier_pda(program_id: &Pubkey, nullifier: &[u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"nullifier", nullifier.as_ref()], program_id)
 }
 
 // ============================================================================
@@ -637,3 +653,373 @@ pub fn make_seed(
         order_type: 0, // LIMIT
     }
 }
+
+// ============================================================================
+// Phase-5 settlement helpers (tee_forced_settle)
+// ============================================================================
+
+/// Byte-for-byte mirror of the on-chain `MatchResultPayload` Borsh shape.
+/// When this diverges the settle test panics early rather than at the
+/// program's deserializer.
+#[derive(BorshSerialize, Clone)]
+pub struct MatchResultPayload {
+    pub match_id: [u8; 16],
+    pub note_a_commitment: [u8; 32],
+    pub note_b_commitment: [u8; 32],
+    pub note_c_commitment: [u8; 32],
+    pub note_d_commitment: [u8; 32],
+    pub note_e_commitment: [u8; 32],
+    pub note_f_commitment: [u8; 32],
+    pub nullifier_a: [u8; 32],
+    pub nullifier_b: [u8; 32],
+    pub order_id_a: [u8; 16],
+    pub order_id_b: [u8; 16],
+    pub base_amount: u64,
+    pub quote_amount: u64,
+    pub buyer_change_amt: u64,
+    pub seller_change_amt: u64,
+    pub buyer_fee_amt: u64,
+    pub seller_fee_amt: u64,
+    pub note_fee_commitment: [u8; 32],
+    pub buyer_relock_order_id: [u8; 16],
+    pub buyer_relock_expiry: u64,
+    pub seller_relock_order_id: [u8; 16],
+    pub seller_relock_expiry: u64,
+    pub clearing_price: u64,
+    pub batch_slot: u64,
+}
+
+/// Sentinel used by on-chain code.
+pub const RELOCK_ORDER_ID_NONE: [u8; 16] = [0u8; 16];
+
+/// Build a 32-byte "commitment" whose integer value fits inside the BN254
+/// scalar field (top byte zero). Use for note_c/d/e/f/fee when Poseidon
+/// will process them during Merkle append — arbitrary 0xFFs would cause
+/// `InvalidProof` inside light-poseidon.
+pub fn fr_safe(seed: u8, salt: u8) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[1] = seed; // byte 0 stays zero → value < 2^248 < Fr modulus
+    out[31] = salt;
+    out
+}
+
+impl MatchResultPayload {
+    /// A sane zero-ish default that tests mutate selectively.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exact_fill(
+        match_id: [u8; 16],
+        note_a: [u8; 32],
+        note_b: [u8; 32],
+        note_c: [u8; 32],
+        note_d: [u8; 32],
+        nullifier_a: [u8; 32],
+        nullifier_b: [u8; 32],
+        order_id_a: [u8; 16],
+        order_id_b: [u8; 16],
+        base_amount: u64,
+        quote_amount: u64,
+    ) -> Self {
+        Self {
+            match_id,
+            note_a_commitment: note_a,
+            note_b_commitment: note_b,
+            note_c_commitment: note_c,
+            note_d_commitment: note_d,
+            note_e_commitment: [0u8; 32],
+            note_f_commitment: [0u8; 32],
+            nullifier_a,
+            nullifier_b,
+            order_id_a,
+            order_id_b,
+            base_amount,
+            quote_amount,
+            buyer_change_amt: 0,
+            seller_change_amt: 0,
+            buyer_fee_amt: 0,
+            seller_fee_amt: 0,
+            note_fee_commitment: [0u8; 32],
+            buyer_relock_order_id: RELOCK_ORDER_ID_NONE,
+            buyer_relock_expiry: 0,
+            seller_relock_order_id: RELOCK_ORDER_ID_NONE,
+            seller_relock_expiry: 0,
+            clearing_price: 0,
+            batch_slot: 0,
+        }
+    }
+}
+
+/// Mirror of `tee_forced_settle::canonical_payload_hash`. Byte-identical
+/// output or signature verification fails.
+pub fn canonical_payload_hash(p: &MatchResultPayload) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"nyx-match-v5");
+    h.update(p.match_id);
+    h.update(p.note_a_commitment);
+    h.update(p.note_b_commitment);
+    h.update(p.note_c_commitment);
+    h.update(p.note_d_commitment);
+    h.update(p.note_e_commitment);
+    h.update(p.note_f_commitment);
+    h.update(p.note_fee_commitment);
+    h.update(p.nullifier_a);
+    h.update(p.nullifier_b);
+    h.update(p.order_id_a);
+    h.update(p.order_id_b);
+    h.update(p.base_amount.to_le_bytes());
+    h.update(p.quote_amount.to_le_bytes());
+    h.update(p.buyer_change_amt.to_le_bytes());
+    h.update(p.seller_change_amt.to_le_bytes());
+    h.update(p.buyer_fee_amt.to_le_bytes());
+    h.update(p.seller_fee_amt.to_le_bytes());
+    h.update(p.buyer_relock_order_id);
+    h.update(p.buyer_relock_expiry.to_le_bytes());
+    h.update(p.seller_relock_order_id);
+    h.update(p.seller_relock_expiry.to_le_bytes());
+    h.update(p.clearing_price.to_le_bytes());
+    h.update(p.batch_slot.to_le_bytes());
+    let out = h.finalize();
+    let mut r = [0u8; 32];
+    r.copy_from_slice(&out);
+    r
+}
+
+/// Solana Ed25519Program ID as a raw pubkey. Uses the canonical Solana
+/// constant — do NOT hardcode bytes; LiteSVM enforces the real program.
+pub fn ed25519_program_id() -> Pubkey {
+    // base58 decode of "Ed25519SigVerify111111111111111111111111111".
+    Pubkey::from([
+        3, 125, 70, 214, 124, 147, 251, 190, 18, 249, 66, 143, 131, 141, 64, 255, 5, 112, 116,
+        73, 39, 244, 138, 100, 252, 202, 112, 68, 128, 0, 0, 0,
+    ])
+}
+
+/// Build an Ed25519Program precompile ix with inlined pubkey + msg + sig.
+/// Layout per Solana SDK:
+///   1  num_signatures = 1
+///   1  padding = 0
+///   2  signature_offset
+///   2  signature_instruction_index = 0xFFFF (same ix)
+///   2  public_key_offset
+///   2  public_key_instruction_index = 0xFFFF
+///   2  message_data_offset
+///   2  message_data_size
+///   2  message_instruction_index = 0xFFFF
+/// Then inline: pubkey (32) || signature (64) || message (N).
+pub fn build_ed25519_verify_ix(pubkey: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> Instruction {
+    let header_len: u16 = 16;
+    let pk_off: u16 = header_len;
+    let sig_off: u16 = pk_off + 32;
+    let msg_off: u16 = sig_off + 64;
+    let msg_len: u16 = message.len() as u16;
+
+    let mut data = Vec::with_capacity(header_len as usize + 32 + 64 + message.len());
+    data.push(1u8); // num_signatures
+    data.push(0u8); // padding
+    data.extend_from_slice(&sig_off.to_le_bytes());
+    data.extend_from_slice(&0xFFFFu16.to_le_bytes()); // signature_instruction_index
+    data.extend_from_slice(&pk_off.to_le_bytes());
+    data.extend_from_slice(&0xFFFFu16.to_le_bytes()); // public_key_instruction_index
+    data.extend_from_slice(&msg_off.to_le_bytes());
+    data.extend_from_slice(&msg_len.to_le_bytes());
+    data.extend_from_slice(&0xFFFFu16.to_le_bytes()); // message_instruction_index
+    data.extend_from_slice(pubkey);
+    data.extend_from_slice(signature);
+    data.extend_from_slice(message);
+
+    Instruction {
+        program_id: ed25519_program_id(),
+        accounts: vec![],
+        data,
+    }
+}
+
+/// Directly seed a NoteLock PDA (bypasses the `lock_note` ix — the Phase-5
+/// settle tests focus on *settlement* not lock mechanics). The PDA is
+/// writable and owned by the vault program so the real handler can close
+/// it via `close = tee_authority`.
+pub fn seed_note_lock(
+    h: &mut Harness,
+    note_commitment: &[u8; 32],
+    order_id: &[u8; 16],
+    expiry_slot: u64,
+    amount: u64,
+) {
+    use solana_account::Account as SolAccount;
+    let (pda, bump) = note_lock_pda(&h.vault_id, note_commitment);
+    // Layout: 8 disc + 32 commit + 16 order_id + 8 expiry + 32 locked_by
+    //       + 8 amount + 1 bump + 7 pad = 112 bytes.
+    let mut data = vec![0u8; 112];
+    data[0..8].copy_from_slice(&anchor_acct_disc("NoteLock"));
+    data[8..40].copy_from_slice(note_commitment);
+    data[40..56].copy_from_slice(order_id);
+    data[56..64].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[64..96].copy_from_slice(&h.tee.pubkey().to_bytes());
+    data[96..104].copy_from_slice(&amount.to_le_bytes());
+    data[104] = bump;
+    let acct = SolAccount {
+        lamports: h.svm.minimum_balance_for_rent_exemption(data.len()),
+        data,
+        owner: h.vault_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    h.svm.set_account(pda, acct).unwrap();
+}
+
+/// Read the current leaf_count out of VaultConfig.
+pub fn vault_leaf_count(h: &Harness) -> u64 {
+    let (pda, _) = vault_config_pda(&h.vault_id);
+    let acct = h.svm.get_account(&pda).expect("vault_config");
+    // Layout: 8 disc + 32 admin + 32 tee_pubkey + 32 root_key + 8 leaf_count
+    let off = 8 + 32 + 32 + 32;
+    u64::from_le_bytes(acct.data[off..off + 8].try_into().unwrap())
+}
+
+/// Read protocol_owner_commitment out of VaultConfig.
+pub fn vault_protocol_owner(h: &Harness) -> [u8; 32] {
+    use vault_layout::PROTOCOL_OWNER_OFFSET;
+    let (pda, _) = vault_config_pda(&h.vault_id);
+    let acct = h.svm.get_account(&pda).expect("vault_config");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&acct.data[PROTOCOL_OWNER_OFFSET..PROTOCOL_OWNER_OFFSET + 32]);
+    out
+}
+
+/// Offsets inside VaultConfig.
+/// Layout (matches programs/vault/src/state.rs::VaultConfig — keep in sync):
+///   8  disc
+///   32 admin + 32 tee_pubkey + 32 root_key
+///   8  leaf_count
+///   32 current_root
+///   32 * 32  roots
+///   32 * 20  zero_subtree_roots
+///   32 * 20  right_path
+///   1  roots_head (u8)
+///   1  bump
+///   32 protocol_owner_commitment
+///   2  fee_rate_bps (u16)
+///   4  _padding
+pub mod vault_layout {
+    pub const ROOT_HISTORY_SIZE: usize = 32;
+    pub const MERKLE_DEPTH: usize = 20;
+    pub const PROTOCOL_OWNER_OFFSET: usize = 8
+        + 32 * 3   // admin + tee + root
+        + 8        // leaf_count
+        + 32       // current_root
+        + 32 * ROOT_HISTORY_SIZE
+        + 32 * MERKLE_DEPTH   // zero subtree roots
+        + 32 * MERKLE_DEPTH   // right path
+        + 1        // roots_head (u8)
+        + 1;       // bump (u8)
+}
+
+/// Overwrite `protocol_owner_commitment` + `fee_rate_bps` directly in the
+/// VaultConfig account. The on-chain program exposes no setter yet —
+/// tests use this to simulate governance having set the fee rate.
+pub fn set_vault_fee_config(h: &mut Harness, owner_commitment: [u8; 32], fee_rate_bps: u16) {
+    use vault_layout::PROTOCOL_OWNER_OFFSET;
+    let (pda, _) = vault_config_pda(&h.vault_id);
+    let mut acct = h.svm.get_account(&pda).expect("vault_config");
+    acct.data[PROTOCOL_OWNER_OFFSET..PROTOCOL_OWNER_OFFSET + 32].copy_from_slice(&owner_commitment);
+    acct.data[PROTOCOL_OWNER_OFFSET + 32..PROTOCOL_OWNER_OFFSET + 34]
+        .copy_from_slice(&fee_rate_bps.to_le_bytes());
+    h.svm.set_account(pda, acct).unwrap();
+}
+
+/// True if the `consumed_note` PDA for `note_commitment` has been initialised.
+pub fn consumed_note_exists(h: &Harness, note_commitment: &[u8; 32]) -> bool {
+    let (pda, _) = consumed_note_pda(&h.vault_id, note_commitment);
+    h.svm
+        .get_account(&pda)
+        .map(|a| !a.data.is_empty() && a.lamports > 0)
+        .unwrap_or(false)
+}
+
+/// True if the `nullifier` PDA exists.
+pub fn nullifier_exists(h: &Harness, nullifier: &[u8; 32]) -> bool {
+    let (pda, _) = nullifier_pda(&h.vault_id, nullifier);
+    h.svm
+        .get_account(&pda)
+        .map(|a| !a.data.is_empty() && a.lamports > 0)
+        .unwrap_or(false)
+}
+
+/// True if a `note_lock` PDA exists for the commitment (unclosed lock).
+pub fn note_lock_exists(h: &Harness, note_commitment: &[u8; 32]) -> bool {
+    let (pda, _) = note_lock_pda(&h.vault_id, note_commitment);
+    h.svm
+        .get_account(&pda)
+        .map(|a| !a.data.is_empty() && a.lamports > 0)
+        .unwrap_or(false)
+}
+
+/// Build the accounts list + data for tee_forced_settle.
+/// Requires: vault initialised, note_lock_a/b seeded for the input notes.
+pub fn build_settle_ix(h: &Harness, payload: &MatchResultPayload) -> Instruction {
+    let (vault_pda, _) = vault_config_pda(&h.vault_id);
+    let (lock_a, _) = note_lock_pda(&h.vault_id, &payload.note_a_commitment);
+    let (lock_b, _) = note_lock_pda(&h.vault_id, &payload.note_b_commitment);
+    let (consumed_a, _) = consumed_note_pda(&h.vault_id, &payload.note_a_commitment);
+    let (consumed_b, _) = consumed_note_pda(&h.vault_id, &payload.note_b_commitment);
+    let (null_a, _) = nullifier_pda(&h.vault_id, &payload.nullifier_a);
+    let (null_b, _) = nullifier_pda(&h.vault_id, &payload.nullifier_b);
+
+    // Re-lock PDAs: always supply a writable account at the expected seed
+    // (zero commitment → use a dummy derivation so the handler still sees
+    // a writable account it ignores).
+    let (lock_e, _) = note_lock_pda(&h.vault_id, &payload.note_e_commitment);
+    let (lock_f, _) = note_lock_pda(&h.vault_id, &payload.note_f_commitment);
+
+    let instructions_sysvar: Pubkey = Pubkey::from([
+        // Sysvar1nstructions1111111111111111111111111
+        6, 167, 213, 23, 24, 123, 209, 102, 53, 218, 212, 4, 85, 253, 194, 192, 193, 36, 198, 143,
+        33, 86, 117, 165, 219, 186, 203, 95, 8, 0, 0, 0,
+    ]);
+
+    let mut data = anchor_disc("tee_forced_settle").to_vec();
+    payload.serialize(&mut data).unwrap();
+
+    Instruction {
+        program_id: h.vault_id,
+        accounts: vec![
+            AccountMeta::new(h.tee.pubkey(), true),
+            AccountMeta::new(vault_pda, false),
+            AccountMeta::new(lock_a, false),
+            AccountMeta::new(lock_b, false),
+            AccountMeta::new(consumed_a, false),
+            AccountMeta::new(consumed_b, false),
+            AccountMeta::new(null_a, false),
+            AccountMeta::new(null_b, false),
+            AccountMeta::new(lock_e, false),
+            AccountMeta::new(lock_f, false),
+            AccountMeta::new_readonly(instructions_sysvar, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    }
+}
+
+/// One-shot: sign payload with TEE, build (ed25519_verify + tee_forced_settle)
+/// message, wrap in a Transaction.
+pub fn build_settle_tx(
+    h: &Harness,
+    payload: &MatchResultPayload,
+) -> Transaction {
+    let msg_hash = canonical_payload_hash(payload);
+    let sig = h.tee.sign_message(&msg_hash);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(sig.as_ref());
+    let tee_pk = h.tee.pubkey().to_bytes();
+    let ed_ix = build_ed25519_verify_ix(&tee_pk, &sig_bytes, &msg_hash);
+    let settle_ix = build_settle_ix(h, payload);
+    Transaction::new(
+        &[&h.tee],
+        Message::new(
+            &[compute_budget_ix(1_400_000), ed_ix, settle_ix],
+            Some(&h.tee.pubkey()),
+        ),
+        h.svm.latest_blockhash(),
+    )
+}
+
