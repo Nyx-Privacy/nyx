@@ -78,6 +78,9 @@ pub struct SubmitOrderArgs {
     pub order_id: [u8; 16],
     pub order_type: u8,
     pub min_fill_qty: u64,
+    /// Phase 5: user_commitment (wallet owner_commitment). Must match the
+    /// WalletEntry PDA seed — callers can't spoof.
+    pub user_commitment: [u8; 32],
 }
 
 // ============================================================================
@@ -341,14 +344,20 @@ impl Harness {
 
 /// Layout must match `OrderRecord` in
 /// programs/matching_engine/src/state/order_record.rs — keep in sync.
+/// Phase 5: +note_amount, +total_quantity, +filled_quantity, +user_commitment;
+/// renamed note_commitment → collateral_note.
 pub const ORDER_RECORD_SIZE: usize = 8    // seq_no
     + 8   // arrival_slot
     + 8   // expiry_slot
     + 8   // price_limit
     + 8   // amount
     + 8   // min_fill_qty
+    + 8   // note_amount
+    + 8   // total_quantity
+    + 8   // filled_quantity
     + 32  // trading_key
-    + 32  // note_commitment
+    + 32  // collateral_note
+    + 32  // user_commitment
     + 32  // order_inclusion_commitment
     + 16  // order_id
     + 1   // side
@@ -356,7 +365,7 @@ pub const ORDER_RECORD_SIZE: usize = 8    // seq_no
     + 1   // order_type
     + 5;  // padding
 
-pub const DARK_CLOB_CAPACITY: usize = 48;
+pub const DARK_CLOB_CAPACITY: usize = 45;
 
 /// Full DarkCLOB data size (no Anchor disc).
 /// Layout: 32 market + 8 next_seq + 8 order_count + orders + 1 bump + 7 pad
@@ -372,8 +381,12 @@ pub struct OrderSeed {
     pub price_limit: u64,
     pub amount: u64,
     pub min_fill_qty: u64,
+    pub note_amount: u64,
+    pub total_quantity: u64,
+    pub filled_quantity: u64,
     pub trading_key: [u8; 32],
-    pub note_commitment: [u8; 32],
+    pub collateral_note: [u8; 32],
+    pub user_commitment: [u8; 32],
     pub order_inclusion_commitment: [u8; 32],
     pub order_id: [u8; 16],
     pub side: u8,
@@ -395,9 +408,14 @@ impl OrderSeed {
         put_u64(&mut off, self.price_limit);
         put_u64(&mut off, self.amount);
         put_u64(&mut off, self.min_fill_qty);
+        put_u64(&mut off, self.note_amount);
+        put_u64(&mut off, self.total_quantity);
+        put_u64(&mut off, self.filled_quantity);
         out[off..off + 32].copy_from_slice(&self.trading_key);
         off += 32;
-        out[off..off + 32].copy_from_slice(&self.note_commitment);
+        out[off..off + 32].copy_from_slice(&self.collateral_note);
+        off += 32;
+        out[off..off + 32].copy_from_slice(&self.user_commitment);
         off += 32;
         out[off..off + 32].copy_from_slice(&self.order_inclusion_commitment);
         off += 32;
@@ -455,10 +473,30 @@ pub fn seed_dark_clob(h: &mut Harness, market: &Pubkey, seeds: &[OrderSeed]) {
 }
 
 /// Build a `run_batch` ix (no CPI, no vault account needed).
+/// `ComputeBudget::SetComputeUnitLimit(cu)` ix. Phase-5's Poseidon calls
+/// are expensive (~17k CU each) so run_batch can exceed the 200k default
+/// when multiple matches produce change notes; tests should prepend this.
+pub fn compute_budget_ix(cu: u32) -> Instruction {
+    // ComputeBudget program id (hardcoded Solana builtin).
+    let program_id = Pubkey::from([
+        3, 6, 70, 111, 229, 33, 23, 50, 255, 236, 173, 186, 114, 195, 155, 231, 188, 140, 229,
+        187, 197, 247, 18, 107, 44, 67, 155, 58, 64, 0, 0, 0,
+    ]);
+    // Discriminator 0x02 = SetComputeUnitLimit.
+    let mut data = vec![0x02u8];
+    data.extend_from_slice(&cu.to_le_bytes());
+    Instruction {
+        program_id,
+        accounts: vec![],
+        data,
+    }
+}
+
 pub fn build_run_batch_ix(h: &Harness, market: &Pubkey, tee: &Keypair) -> Instruction {
     let (clob_pda, _) = dark_clob_pda(&h.me_id, market);
     let (match_pda, _) = matching_config_pda(&h.me_id, market);
     let (batch_pda, _) = batch_results_pda(&h.me_id, market);
+    let (vault_pda, _) = vault_config_pda(&h.vault_id);
 
     let mut data = anchor_disc("run_batch").to_vec();
     data.extend_from_slice(&market.to_bytes());
@@ -470,6 +508,7 @@ pub fn build_run_batch_ix(h: &Harness, market: &Pubkey, tee: &Keypair) -> Instru
             AccountMeta::new(clob_pda, false),
             AccountMeta::new_readonly(match_pda, false),
             AccountMeta::new(batch_pda, false),
+            AccountMeta::new_readonly(vault_pda, false),
             AccountMeta::new_readonly(h.pyth_account, false),
         ],
         data,
@@ -547,15 +586,15 @@ pub fn read_order_status(h: &Harness, market: &Pubkey, slot: usize) -> u8 {
     let (pda, _) = dark_clob_pda(&h.me_id, market);
     let acct = h.svm.get_account(&pda).expect("dark_clob");
     // inside data: 8 disc + 32 market + 8 next_seq + 8 order_count + orders*
-    // status byte within an OrderRecord:
-    //   8 seq_no + 8 arr + 8 exp + 8 price + 8 amt + 8 minfill + 32 tk + 32 nc
-    //   + 32 oic + 16 oid + 1 side + 1 status ...
+    // status byte within an OrderRecord (Phase 5): 9 u64s + 4×32B + 16B + side+status.
+    //   9×8 (u64s: seq/arr/exp/price/amt/minfill/note_amount/total_qty/filled_qty)
+    //   + 32 tk + 32 collateral + 32 user_commit + 32 oic + 16 oid + 1 side + 1 status
     let off = 8 + 32 + 8 + 8 + slot * ORDER_RECORD_SIZE
-        + 8 + 8 + 8 + 8 + 8 + 8 + 32 + 32 + 32 + 16 + 1;
+        + 8 * 9 + 32 * 4 + 16 + 1;
     acct.data[off]
 }
 
-/// Build a default OrderSeed with deterministic note_commitment = [side,seq,0,...].
+/// Build a default OrderSeed with deterministic collateral_note = [side,seq,0,...].
 pub fn make_seed(
     seq_no: u64,
     side: u8,
@@ -564,14 +603,20 @@ pub fn make_seed(
     expiry_slot: u64,
     trading_key: [u8; 32],
 ) -> OrderSeed {
-    let mut note_commitment = [0u8; 32];
-    note_commitment[0] = side;
-    note_commitment[1..9].copy_from_slice(&seq_no.to_le_bytes());
+    let mut collateral_note = [0u8; 32];
+    collateral_note[0] = side;
+    collateral_note[1..9].copy_from_slice(&seq_no.to_le_bytes());
     let mut order_id = [0u8; 16];
+    // Reserve byte 15 for uniqueness so the all-zero sentinel isn't hit.
     order_id[0..8].copy_from_slice(&seq_no.to_le_bytes());
+    order_id[15] = side.wrapping_add(1);
     let mut oic = [0u8; 32];
     oic[0..8].copy_from_slice(&seq_no.to_le_bytes());
     oic[8] = side;
+    // Phase 5: Poseidon (BN254) needs inputs < Fr modulus. Zero the top
+    // byte so arbitrary 32-byte harness fixtures stay inside the field.
+    let mut user_commitment = trading_key;
+    user_commitment[0] = 0;
     OrderSeed {
         seq_no,
         arrival_slot: 1,
@@ -579,8 +624,12 @@ pub fn make_seed(
         price_limit,
         amount,
         min_fill_qty: 0,
+        note_amount: amount.saturating_mul(price_limit).max(1),
+        total_quantity: amount,
+        filled_quantity: 0,
         trading_key,
-        note_commitment,
+        collateral_note,
+        user_commitment,
         order_inclusion_commitment: oic,
         order_id,
         side,

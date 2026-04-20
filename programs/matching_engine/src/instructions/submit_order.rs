@@ -56,6 +56,10 @@ pub struct SubmitOrderArgs {
     pub order_type: u8,
     /// 0 = any fill allowed.
     pub min_fill_qty: u64,
+    /// Phase 5: user_commitment (owner_commitment) tied to the trading key.
+    /// Anchor's PDA seeds constraint (`seeds = [b"wallet", user_commitment]`)
+    /// guarantees this matches the wallet_entry account — callers can't spoof.
+    pub user_commitment: [u8; 32],
 }
 
 #[derive(Accounts)]
@@ -90,10 +94,15 @@ pub struct SubmitOrder<'info> {
     pub vault_config: AccountLoader<'info, VaultConfig>,
 
     /// Wallet entry proving the trading_key's User Commitment is registered.
-    /// For Phase 3 the membership check is delegated to MagicBlock's
-    /// Permission Group; we still require the WalletEntry to exist so we can
-    /// audit Trading-Key-to-User-Commitment mapping in Phase 4.
-    /// CHECK: We verify the PDA seed. Presence implies registration.
+    /// Phase 5: seeded with `args.user_commitment` so callers cannot lie about
+    /// which owner_commitment the trade belongs to — a wrong commitment makes
+    /// Anchor fail the PDA check before the handler runs.
+    /// CHECK: Validated by `seeds` constraint. Existence implies registration.
+    #[account(
+        seeds = [b"wallet", args.user_commitment.as_ref()],
+        bump,
+        seeds::program = vault::ID,
+    )]
     pub wallet_entry: UncheckedAccount<'info>,
 
     /// TEE authority — the signer the vault program checks in `lock_note`.
@@ -131,6 +140,12 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
     );
     require!(args.amount > 0, MatchingError::ZeroAmount);
     require!(args.price_limit > 0, MatchingError::ZeroPrice);
+    // Reserve the all-zero order_id as the `RELOCK_ORDER_ID_NONE` sentinel
+    // in MatchResult. Client code MUST pick a random 16-byte id anyway.
+    require!(
+        args.order_id != [0u8; 16],
+        MatchingError::InvalidOrderId
+    );
 
     // min_fill_qty must not exceed amount (silly orders rejected at ingress).
     require!(
@@ -214,6 +229,7 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
         args.note_commitment,
         args.order_id,
         args.expiry_slot,
+        args.note_amount,
     )
     .map_err(|_| MatchingError::LockNoteCpiFailed)?;
 
@@ -244,8 +260,15 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
             price_limit: args.price_limit,
             amount: args.amount,
             min_fill_qty: args.min_fill_qty,
+            note_amount: args.note_amount,
+            // Phase 5: at submit time, `amount` equals the full order size.
+            // run_batch decrements `amount` and bumps `filled_quantity` on
+            // every partial fill; `total_quantity` never changes.
+            total_quantity: args.amount,
+            filled_quantity: 0,
             trading_key: ctx.accounts.trading_key.key(),
-            note_commitment: args.note_commitment,
+            collateral_note: args.note_commitment,
+            user_commitment: args.user_commitment,
             order_inclusion_commitment: inclusion_commitment,
             order_id: args.order_id,
             side: args.side,

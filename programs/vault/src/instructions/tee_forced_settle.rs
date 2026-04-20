@@ -26,20 +26,55 @@ use crate::state::*;
 use anchor_lang::prelude::*;
 use core::mem::size_of;
 
+/// Phase-5 MatchResultPayload — extended with change-note commitments and
+/// input-note values so the vault can verify the conservation law before
+/// writing any state.
+///
+/// Conservation law (spec `change_note_implementation.md`):
+///   note_A.amount == quote_amount + buyer_change_amt   (buyer pays quote)
+///   note_B.amount == base_amount  + seller_change_amt  (seller pays base)
+///
+/// `note_e_commitment` / `note_f_commitment` carry the Poseidon-hashed
+/// change note commitments for buyer and seller respectively. They are
+/// encoded as `[0u8; 32]` when the corresponding `change_amt` is zero
+/// (exact-fill) to keep the payload fixed-size and Borsh-stable; the
+/// handler skips the tree insertion for zero commitments.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-#[instruction(payload: MatchResultPayload)]
 pub struct MatchResultPayload {
     pub match_id: [u8; 16],
     pub note_a_commitment: [u8; 32],
     pub note_b_commitment: [u8; 32],
     pub note_c_commitment: [u8; 32],
     pub note_d_commitment: [u8; 32],
+    pub note_e_commitment: [u8; 32],
+    pub note_f_commitment: [u8; 32],
     pub nullifier_a: [u8; 32],
     pub nullifier_b: [u8; 32],
     pub order_id_a: [u8; 16],
     pub order_id_b: [u8; 16],
     pub base_amount: u64,
     pub quote_amount: u64,
+    pub buyer_change_amt: u64,
+    pub seller_change_amt: u64,
+    /// Buyer-side protocol fee (quote units). Subtracted from note_A at
+    /// conservation-law check time. Already rolled into the batch fee
+    /// accumulator by `run_batch`.
+    pub buyer_fee_amt: u64,
+    /// Seller-side protocol fee (base units).
+    pub seller_fee_amt: u64,
+    /// Batch-level fee note commitment for one mint. `[0u8;32]` = no fee
+    /// note to flush on this call (normal case when settlement of a batch
+    /// spans multiple txs). Populated by the TEE only on the settlement
+    /// chosen to carry the flush — typically the first settlement in the
+    /// batch (see `partial_fill_and_fee_notes.md §2.4`).
+    pub note_fee_commitment: [u8; 32],
+    /// If non-zero, re-lock note_e_commitment against `buyer_relock_order_id`
+    /// for `buyer_relock_expiry`. The continuing order keeps trading in
+    /// the next batch without the user doing anything.
+    pub buyer_relock_order_id: [u8; 16],
+    pub buyer_relock_expiry: u64,
+    pub seller_relock_order_id: [u8; 16],
+    pub seller_relock_expiry: u64,
     pub clearing_price: u64,
     pub batch_slot: u64,
 }
@@ -112,6 +147,21 @@ pub struct TeeForcedSettle<'info> {
     )]
     pub nullifier_b_entry: AccountLoader<'info, NullifierEntry>,
 
+    /// Phase-5 re-lock PDA for the buyer's change note. Created manually
+    /// by the handler iff `payload.buyer_relock_order_id != NONE`; else
+    /// the caller may pass any dummy writable account — the handler
+    /// never touches it. The handler enforces the seed derivation
+    /// `[NoteLock::SEED, payload.note_e_commitment]` when it *does* use
+    /// this account.
+    /// CHECK: Seeds validated in handler when re-lock is requested.
+    #[account(mut)]
+    pub note_lock_e: UncheckedAccount<'info>,
+
+    /// Same as `note_lock_e`, for the seller.
+    /// CHECK: Seeds validated in handler when re-lock is requested.
+    #[account(mut)]
+    pub note_lock_f: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -138,6 +188,55 @@ pub fn tee_forced_settle_handler(
             lock_b.order_id == payload.order_id_b,
             VaultError::NoteNotLockedForOrder
         );
+
+        // Phase-5 conservation law (with fees): the value escrowed under
+        // each NoteLock MUST equal trade_leg + change_leg + fee_leg. This
+        // check runs BEFORE any state mutation so a malicious TEE cannot
+        // settle an inconsistent payload.
+        //   buyer  (note_a is quote): lock_a.amount == quote_amount + buyer_change_amt + buyer_fee_amt
+        //   seller (note_b is base):  lock_b.amount == base_amount  + seller_change_amt + seller_fee_amt
+        let expected_a = payload
+            .quote_amount
+            .checked_add(payload.buyer_change_amt)
+            .and_then(|v| v.checked_add(payload.buyer_fee_amt))
+            .ok_or(error!(VaultError::ArithmeticOverflow))?;
+        require!(
+            lock_a.amount == expected_a,
+            VaultError::ConservationViolation
+        );
+        let expected_b = payload
+            .base_amount
+            .checked_add(payload.seller_change_amt)
+            .and_then(|v| v.checked_add(payload.seller_fee_amt))
+            .ok_or(error!(VaultError::ArithmeticOverflow))?;
+        require!(
+            lock_b.amount == expected_b,
+            VaultError::ConservationViolation
+        );
+
+        // A non-zero change amount MUST be accompanied by a non-zero
+        // commitment, and vice-versa — otherwise the TEE could steal funds
+        // by declaring change but never appending the leaf, or append a
+        // commitment out of thin air.
+        let has_e = payload.note_e_commitment != [0u8; 32];
+        let has_f = payload.note_f_commitment != [0u8; 32];
+        require!(
+            has_e == (payload.buyer_change_amt > 0),
+            VaultError::ChangeNoteInconsistent
+        );
+        require!(
+            has_f == (payload.seller_change_amt > 0),
+            VaultError::ChangeNoteInconsistent
+        );
+
+        // Re-lock requires a change note. You can't relock a note that
+        // doesn't exist — the TEE would be conjuring collateral from air.
+        if payload.buyer_relock_order_id != [0u8; 16] {
+            require!(has_e, VaultError::RelockRequiresChangeNote);
+        }
+        if payload.seller_relock_order_id != [0u8; 16] {
+            require!(has_f, VaultError::RelockRequiresChangeNote);
+        }
     }
 
     // Lock sanity — already enforced by the Accounts constraints (order_id match).
@@ -171,22 +270,154 @@ pub fn tee_forced_settle_handler(
     nb.bump = ctx.bumps.nullifier_b_entry;
     nb._padding = [0u8; 7];
 
-    // Append output note commitments to Merkle tree.
+    // Append output note commitments to Merkle tree. Order:
+    //   note_c (trade leg to buyer), note_d (trade leg to seller),
+    //   note_e (buyer change, if any), note_f (seller change, if any),
+    //   note_fee (batch fee note, if any).
+    // The `u64::MAX` sentinel means "no leaf was inserted for this slot".
     let cfg = &mut ctx.accounts.vault_config.load_mut()?;
     let leaf_c = cfg.leaf_count;
     let _ = append_leaf(cfg, payload.note_c_commitment)?;
     let leaf_d = cfg.leaf_count;
-    let new_root = append_leaf(cfg, payload.note_d_commitment)?;
+    let mut new_root = append_leaf(cfg, payload.note_d_commitment)?;
+
+    let leaf_e = if payload.note_e_commitment != [0u8; 32] {
+        let idx = cfg.leaf_count;
+        new_root = append_leaf(cfg, payload.note_e_commitment)?;
+        idx
+    } else {
+        u64::MAX
+    };
+    let leaf_f = if payload.note_f_commitment != [0u8; 32] {
+        let idx = cfg.leaf_count;
+        new_root = append_leaf(cfg, payload.note_f_commitment)?;
+        idx
+    } else {
+        u64::MAX
+    };
+
+    // Phase-5: flush the per-batch protocol fee note, if any. Distinct
+    // from the change notes because it's owned by the protocol_owner —
+    // the same append machinery applies. Consistency check: caller must
+    // actually have set `protocol_owner_commitment` — else fee accrual
+    // was paused upstream and we should reject a supplied fee note.
+    let leaf_fee = if payload.note_fee_commitment != [0u8; 32] {
+        require!(
+            cfg.protocol_owner_commitment != [0u8; 32],
+            VaultError::ProtocolOwnerUnset
+        );
+        let idx = cfg.leaf_count;
+        new_root = append_leaf(cfg, payload.note_fee_commitment)?;
+        idx
+    } else {
+        u64::MAX
+    };
+
+    // Phase-5: atomic re-lock of change notes against continuing orders.
+    // Done LAST so a re-lock failure (e.g., insufficient lamports on
+    // `tee_authority`) rolls back every preceding state change.
+    if payload.buyer_relock_order_id != [0u8; 16] {
+        create_relock_pda(
+            &ctx.accounts.note_lock_e,
+            &ctx.accounts.tee_authority,
+            &ctx.accounts.system_program,
+            &payload.note_e_commitment,
+            &payload.buyer_relock_order_id,
+            payload.buyer_relock_expiry,
+            payload.buyer_change_amt,
+        )?;
+    }
+    if payload.seller_relock_order_id != [0u8; 16] {
+        create_relock_pda(
+            &ctx.accounts.note_lock_f,
+            &ctx.accounts.tee_authority,
+            &ctx.accounts.system_program,
+            &payload.note_f_commitment,
+            &payload.seller_relock_order_id,
+            payload.seller_relock_expiry,
+            payload.seller_change_amt,
+        )?;
+    }
 
     emit!(TradeSettled {
         match_id: payload.match_id,
         clearing_price: payload.clearing_price,
         base_amount: payload.base_amount,
         quote_amount: payload.quote_amount,
+        buyer_change_amt: payload.buyer_change_amt,
+        seller_change_amt: payload.seller_change_amt,
+        buyer_fee_amt: payload.buyer_fee_amt,
+        seller_fee_amt: payload.seller_fee_amt,
         note_c_leaf: leaf_c,
         note_d_leaf: leaf_d,
+        note_e_leaf: leaf_e,
+        note_f_leaf: leaf_f,
+        note_fee_leaf: leaf_fee,
+        buyer_relock_active: payload.buyer_relock_order_id != [0u8; 16],
+        seller_relock_active: payload.seller_relock_order_id != [0u8; 16],
         new_root,
     });
+    Ok(())
+}
+
+/// Manually create a NoteLock PDA so the settlement tx can atomically
+/// re-lock a change note against the continuing order. The seeds MUST be
+/// `[NoteLock::SEED, note_commitment]` — this is what `cancel_order` /
+/// `release_lock` will look up. Returns an error if the account is
+/// non-empty (a prior lock still exists for this commitment).
+#[allow(clippy::too_many_arguments)]
+fn create_relock_pda<'info>(
+    note_lock_ai: &UncheckedAccount<'info>,
+    payer: &Signer<'info>,
+    system_program: &Program<'info, System>,
+    note_commitment: &[u8; 32],
+    order_id: &[u8; 16],
+    expiry_slot: u64,
+    amount: u64,
+) -> Result<()> {
+    use anchor_lang::system_program;
+    use core::mem::size_of;
+
+    let (expected_pda, bump) =
+        Pubkey::find_program_address(&[NoteLock::SEED, note_commitment.as_ref()], &crate::ID);
+    require_keys_eq!(note_lock_ai.key(), expected_pda, VaultError::Unauthorized);
+    require!(
+        note_lock_ai.data_is_empty() && note_lock_ai.lamports() == 0,
+        VaultError::NoteAlreadyLocked
+    );
+
+    let space = 8 + size_of::<NoteLock>();
+    let lamports = Rent::get()?.minimum_balance(space);
+    let bump_arr = [bump];
+    let seeds: &[&[u8]] = &[NoteLock::SEED, note_commitment.as_ref(), &bump_arr];
+    let signer_seeds = &[seeds];
+
+    let cpi_ctx = CpiContext::new_with_signer(
+        system_program.to_account_info(),
+        system_program::CreateAccount {
+            from: payer.to_account_info(),
+            to: note_lock_ai.to_account_info(),
+        },
+        signer_seeds,
+    );
+    system_program::create_account(cpi_ctx, lamports, space as u64, &crate::ID)?;
+
+    // Populate. Discriminator for zero_copy is the first 8 bytes of
+    // anchor_lang::solana_program::hash::hash("account:NoteLock").
+    {
+        let mut data = note_lock_ai.try_borrow_mut_data()?;
+        let disc = NoteLock::DISCRIMINATOR;
+        data[..8].copy_from_slice(disc);
+        let (_head, body) = data.split_at_mut(8);
+        let lock: &mut NoteLock = bytemuck::from_bytes_mut(body);
+        lock.note_commitment = *note_commitment;
+        lock.order_id = *order_id;
+        lock.expiry_slot = expiry_slot;
+        lock.locked_by = payer.key();
+        lock.amount = amount;
+        lock.bump = bump;
+        lock._padding = [0u8; 7];
+    }
     Ok(())
 }
 
@@ -196,7 +427,19 @@ pub struct TradeSettled {
     pub clearing_price: u64,
     pub base_amount: u64,
     pub quote_amount: u64,
+    pub buyer_change_amt: u64,
+    pub seller_change_amt: u64,
+    pub buyer_fee_amt: u64,
+    pub seller_fee_amt: u64,
     pub note_c_leaf: u64,
     pub note_d_leaf: u64,
+    /// `u64::MAX` means no buyer-change leaf was inserted (exact fill).
+    pub note_e_leaf: u64,
+    /// `u64::MAX` means no seller-change leaf was inserted (exact fill).
+    pub note_f_leaf: u64,
+    /// `u64::MAX` means no batch fee note was flushed on this settlement.
+    pub note_fee_leaf: u64,
+    pub buyer_relock_active: bool,
+    pub seller_relock_active: bool,
     pub new_root: [u8; 32],
 }

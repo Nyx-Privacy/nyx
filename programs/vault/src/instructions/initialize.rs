@@ -39,7 +39,9 @@ pub fn initialize_handler(
     cfg.roots = [[0u8; 32]; ROOT_HISTORY_SIZE];
     cfg.roots_head = 0;
     cfg.bump = ctx.bumps.vault_config;
-    cfg._padding = [0u8; 6];
+    cfg.protocol_owner_commitment = [0u8; 32];
+    cfg.fee_rate_bps = 0;
+    cfg._padding = [0u8; 4];
     let _ = VaultError::ZeroAmount; // keep errors linked in
     Ok(())
 }

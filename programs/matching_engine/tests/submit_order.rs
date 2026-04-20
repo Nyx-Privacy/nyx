@@ -35,6 +35,7 @@ fn test_notional_exceeds_note_value_rejected() {
         order_id: [1u8; 16],
         order_type: 0,
         min_fill_qty: 0,
+        user_commitment,
     };
     let ix = h.build_submit_order_ix(args, &user_commitment);
     let tx = Transaction::new(
@@ -74,6 +75,7 @@ fn test_note_not_in_tree_rejected() {
         order_id: [1u8; 16],
         order_type: 0,
         min_fill_qty: 0,
+        user_commitment,
     };
     let ix = h.build_submit_order_ix(args, &user_commitment);
     let tx = Transaction::new(
@@ -113,6 +115,7 @@ fn test_unauthorized_trading_key_rejected() {
         order_id: [1u8; 16],
         order_type: 0,
         min_fill_qty: 0,
+        user_commitment,
     };
     let ix = h.build_submit_order_ix(args, &user_commitment);
     let tx = Transaction::new(

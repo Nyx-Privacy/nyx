@@ -35,8 +35,16 @@ pub struct VaultConfig {
     pub right_path: [[u8; 32]; MERKLE_DEPTH as usize],
     pub roots_head: u8,
     pub bump: u8,
+    /// Phase-5 protocol-owned shielded identity. Every fee note flushed
+    /// at batch close carries `owner_commitment = protocol_owner_commitment`
+    /// so the protocol treasury's Spending Key can later VALID_SPEND them.
+    /// Zero-bytes until initialised — fee accrual paused while unset.
+    pub protocol_owner_commitment: [u8; 32],
+    /// Protocol fee rate expressed in basis points of notional. e.g.
+    /// `30 = 0.30 %`. Applied equally to both sides of every match.
+    pub fee_rate_bps: u16,
     /// Explicit trailing padding so the zero-copy Pod layout has no implicit padding.
-    pub _padding: [u8; 6],
+    pub _padding: [u8; 4],
 }
 
 impl VaultConfig {
@@ -85,12 +93,19 @@ impl ConsumedNoteEntry {
 }
 
 /// PDA locking a note to a specific order. Automatically expires at `expiry_slot`.
+///
+/// Phase 5 additions:
+///   - `amount` is the full value of the locked note (in base units of the
+///     asset the note carries). Captured at `lock_note` time so
+///     `tee_forced_settle` can enforce the conservation-law equality
+///     `note.amount == trade_leg + change_leg` before ever writing state.
 #[account(zero_copy)]
 pub struct NoteLock {
     pub note_commitment: [u8; 32],
     pub order_id: [u8; 16],
     pub expiry_slot: u64,
     pub locked_by: Pubkey, // the TEE key that locked
+    pub amount: u64,
     pub bump: u8,
     pub _padding: [u8; 7],
 }

@@ -53,4 +53,16 @@ pub enum VaultError {
     // ---- Authorization ----
     #[msg("Caller is not authorized for this instruction")]
     Unauthorized,
+
+    // ---- Phase 5: change-note settlement ----
+    #[msg("Conservation law violated: note.amount != trade_leg + change_leg + fee_leg")]
+    ConservationViolation,
+    #[msg("Change-note commitment inconsistent with change amount (one is zero, the other is not)")]
+    ChangeNoteInconsistent,
+    #[msg("Re-lock requested but no change-note commitment was provided for that side")]
+    RelockRequiresChangeNote,
+    #[msg("Protocol owner commitment not initialised; fee accrual paused")]
+    ProtocolOwnerUnset,
+    #[msg("Fee-note commitment supplied with zero fee (or vice-versa)")]
+    FeeNoteInconsistent,
 }

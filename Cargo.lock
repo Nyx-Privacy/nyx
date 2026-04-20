@@ -2049,6 +2049,7 @@ dependencies = [
  "anchor-lang",
  "borsh 1.6.1",
  "bytemuck",
+ "darkpool-crypto",
  "ephemeral-rollups-sdk",
  "litesvm",
  "sha2 0.10.9",

@@ -25,6 +25,7 @@ anchor-lang = { workspace = true, features = ["init-if-needed"] }
 solana-program = { workspace = true }
 ephemeral-rollups-sdk = { workspace = true }
 vault = { path = "../vault", features = ["cpi"] }
+darkpool-crypto = { path = "../../crates/darkpool-crypto" }
 bytemuck = { version = "1.20.0", features = ["min_const_generics"] }
 
 [dev-dependencies]

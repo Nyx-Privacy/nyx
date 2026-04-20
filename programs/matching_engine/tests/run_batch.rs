@@ -55,7 +55,7 @@ fn test_uniform_clearing_price() {
     let ix = build_run_batch_ix(&h, &market, &h.tee);
     let tx = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("run_batch");
@@ -86,7 +86,7 @@ fn test_intra_batch_ordering_irrelevant() {
         let ix = build_run_batch_ix(&h, &market, &h.tee);
         let tx = Transaction::new(
             &[&h.tee],
-            Message::new(&[ix], Some(&h.tee.pubkey())),
+            Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
             h.svm.latest_blockhash(),
         );
         h.svm.send_transaction(tx).expect("run_batch");
@@ -137,7 +137,7 @@ fn test_circuit_breaker_pauses_batch() {
     let ix = build_run_batch_ix(&h, &market, &h.tee);
     let tx = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("run_batch");
@@ -195,7 +195,7 @@ fn test_circuit_breaker_does_not_affect_other_pairs() {
     };
     let tx_a = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix_a], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix_a], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx_a).expect("run_batch A");
@@ -210,7 +210,7 @@ fn test_circuit_breaker_does_not_affect_other_pairs() {
     };
     let tx_b = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix_b], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix_b], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx_b).expect("run_batch B");
@@ -249,7 +249,7 @@ fn test_expired_orders_drained() {
     let ix = build_run_batch_ix(&h, &market, &h.tee);
     let tx = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("run_batch");
@@ -283,7 +283,7 @@ fn test_min_fill_qty_enforced() {
     let ix = build_run_batch_ix(&h, &market, &h.tee);
     let tx = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("run_batch");
@@ -322,7 +322,7 @@ fn test_match_result_signed_by_tee_key() {
     let ix = build_run_batch_ix(&h, &market, &tee_kp);
     let tx = Transaction::new(
         &[&tee_kp],
-        Message::new(&[ix], Some(&tee_kp.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&tee_kp.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("tee-signed run_batch ok");
@@ -358,7 +358,7 @@ fn test_inclusion_root_published() {
     let ix = build_run_batch_ix(&h, &market, &h.tee);
     let tx = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx).expect("run_batch");
@@ -416,7 +416,7 @@ fn test_clob_memory_state_isolated() {
     let ix_a = build_run_batch_ix(&h, &market_a, &h.tee);
     let tx_a = Transaction::new(
         &[&h.tee],
-        Message::new(&[ix_a], Some(&h.tee.pubkey())),
+        Message::new(&[compute_budget_ix(1_400_000), ix_a], Some(&h.tee.pubkey())),
         h.svm.latest_blockhash(),
     );
     h.svm.send_transaction(tx_a).expect("run_batch A");

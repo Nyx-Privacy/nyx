@@ -39,14 +39,24 @@
 use anchor_lang::prelude::*;
 
 use crate::errors::MatchingError;
-use crate::state::{
-    BatchResults, DarkCLOB, MatchResult, MatchingConfig, ORDER_SIDE_ASK, ORDER_SIDE_BID,
-    ORDER_STATUS_ACTIVE, ORDER_STATUS_EXPIRED, ORDER_STATUS_FILLED, ORDER_TYPE_FOK, ORDER_TYPE_IOC,
-    MATCH_RESULT_STATUS_FILLED,
-};
-use crate::state::dark_clob::DARK_CLOB_CAPACITY;
 use crate::state::batch_results::BATCH_RESULTS_CAPACITY;
+use crate::state::dark_clob::DARK_CLOB_CAPACITY;
 use crate::state::pyth::read_oracle_price;
+use crate::state::{
+    change_note, BatchResults, DarkCLOB, MatchResult, MatchingConfig, ORDER_SIDE_ASK,
+    ORDER_SIDE_BID, ORDER_STATUS_ACTIVE, ORDER_STATUS_EXPIRED, ORDER_STATUS_FILLED, ORDER_TYPE_FOK,
+    ORDER_TYPE_IOC, MATCH_RESULT_STATUS_FILLED, RELOCK_ORDER_ID_NONE,
+};
+use darkpool_crypto::note::commitment_from_fields;
+use vault::state::VaultConfig;
+
+/// Orders whose `expiry_slot` is within this many slots of `now_slot` are
+/// drained before the matching pass, not included in any match. This
+/// guarantees that the follow-up `tee_forced_settle` transaction has
+/// enough runway to land on L1 before the lock auto-expires — without
+/// this guard, a partial-fill re-lock could hand the user a change note
+/// that settles AFTER the (re-used) expiry, orphaning the order.
+pub const SETTLEMENT_BUFFER_SLOTS: u64 = 20;
 
 #[derive(Accounts)]
 #[instruction(market: Pubkey)]
@@ -85,6 +95,16 @@ pub struct RunBatch<'info> {
         bump = batch_results.load()?.bump,
     )]
     pub batch_results: AccountLoader<'info, BatchResults>,
+
+    /// Phase 5: read-only snapshot of the vault's fee rate + protocol
+    /// owner_commitment. Crossing the delegation boundary is fine at
+    /// read-time — the ER gives us a consistent view at batch start.
+    #[account(
+        seeds = [VaultConfig::SEED],
+        bump = vault_config.load()?.bump,
+        seeds::program = vault::ID,
+    )]
+    pub vault_config: AccountLoader<'info, VaultConfig>,
 
     /// Must equal `matching_config.pyth_account`.
     /// CHECK: validated by pubkey comparison in handler.
@@ -214,14 +234,21 @@ fn deviates_by_more_than_bps(p: u64, reference: u64, bps: u64) -> bool {
 
 pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
     // Market + oracle sanity.
-    {
+    let (base_mint, quote_mint) = {
         let cfg = ctx.accounts.matching_config.load()?;
         require!(cfg.market == market, MatchingError::MarketMismatch);
         require!(
             ctx.accounts.oracle_account.key() == cfg.pyth_account,
             MatchingError::OracleAccountMismatch
         );
-    }
+        (cfg.base_mint, cfg.quote_mint)
+    };
+
+    // Phase-5: read-only snapshot of protocol fee + owner commitment.
+    let (fee_rate_bps, protocol_owner_commitment) = {
+        let vc = ctx.accounts.vault_config.load()?;
+        (vc.fee_rate_bps as u64, vc.protocol_owner_commitment)
+    };
 
     let now_slot = Clock::get()?.slot;
     let pyth_twap = read_oracle_price(&ctx.accounts.oracle_account.to_account_info())?;
@@ -229,7 +256,34 @@ pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
 
     let circuit_bps = ctx.accounts.matching_config.load()?.circuit_breaker_bps;
 
-    // --- Pass 1: expire + collect active indices + snapshot inclusion commits ---
+    // --- Pass 0: reset per-batch FeeAccumulators ---
+    //
+    // Slot 0 tracks base-asset fees (seller pays in base units), slot 1
+    // tracks quote-asset fees (buyer pays in quote units). We rebind the
+    // mints every batch even though they rarely change — this keeps the
+    // struct self-describing and makes market rewires (Phase-6 admin ix)
+    // correct-by-construction.
+    {
+        let mut br = ctx.accounts.batch_results.load_mut()?;
+        br.fee_accumulators[0].token_mint = base_mint;
+        br.fee_accumulators[0].accumulated_fees = 0;
+        br.fee_accumulators[0].batch_slot = now_slot;
+        br.fee_accumulators[0].flushed_commitment = [0u8; 32];
+        br.fee_accumulators[1].token_mint = quote_mint;
+        br.fee_accumulators[1].accumulated_fees = 0;
+        br.fee_accumulators[1].batch_slot = now_slot;
+        br.fee_accumulators[1].flushed_commitment = [0u8; 32];
+    }
+
+    // --- Pass 1: drain expired + too-close-to-expiry, collect active indices ---
+    //
+    // Phase-5: orders whose `expiry_slot` is within SETTLEMENT_BUFFER_SLOTS
+    // of `now_slot` are drained BEFORE matching. This is the
+    // orphan-order fix: if we matched such an order and the settlement tx
+    // landed on L1 a few slots later, the NoteLock could expire between
+    // run_batch and tee_forced_settle — then the user could `release_lock`
+    // and steal back their funds while the counterparty is stuck with no
+    // recourse. Refusing to match is strictly safer.
     let mut bid_idxs: Vec<usize> = Vec::with_capacity(DARK_CLOB_CAPACITY);
     let mut ask_idxs: Vec<usize> = Vec::with_capacity(DARK_CLOB_CAPACITY);
     let mut inclusion_leaves: Vec<[u8; 32]> = Vec::with_capacity(DARK_CLOB_CAPACITY);
@@ -240,7 +294,10 @@ pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
             if o.status != ORDER_STATUS_ACTIVE {
                 continue;
             }
-            if o.expiry_slot <= now_slot {
+            if o.expiry_slot <= now_slot.saturating_add(SETTLEMENT_BUFFER_SLOTS) {
+                // Either already expired or too close to expiry to safely
+                // settle — drain it. (Owner still calls release_lock on L1
+                // to free the note; we don't CPI from here.)
                 o.status = ORDER_STATUS_EXPIRED;
                 clob.order_count = clob.order_count.saturating_sub(1);
                 continue;
@@ -279,8 +336,17 @@ pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
         } else {
             clearing_price = p_star;
             // --- Generate matches ---
-            let crossings_produced =
-                generate_matches(&ctx, p_star, pyth_twap, now_slot, &bid_idxs, &ask_idxs)?;
+            let crossings_produced = generate_matches(
+                &ctx,
+                p_star,
+                pyth_twap,
+                now_slot,
+                &bid_idxs,
+                &ask_idxs,
+                &base_mint,
+                &quote_mint,
+                fee_rate_bps,
+            )?;
             match_count = crossings_produced as u64;
         }
     } else {
@@ -299,6 +365,52 @@ pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
                 o.status = crate::state::ORDER_STATUS_CANCELLED;
                 clob.order_count = clob.order_count.saturating_sub(1);
             }
+        }
+    }
+
+    // --- Flush fee-notes for this batch ---
+    //
+    // For each fee accumulator with non-zero accumulated_fees, derive a
+    // deterministic (nonce, r) pair and compute the Poseidon commitment.
+    // The first `tee_forced_settle` of this batch will consume it.
+    // Skipped entirely when `protocol_owner_commitment` is unset.
+    if protocol_owner_commitment != [0u8; 32] && cb_tripped == 0 {
+        // Use a distinct role byte so the domain-separation tag space
+        // doesn't collide with change-note derivations.
+        const FEE_ROLE_BASE: u8 = 0xFB;
+        const FEE_ROLE_QUOTE: u8 = 0xFC;
+
+        let mut br = ctx.accounts.batch_results.load_mut()?;
+
+        // Slot 0 = base-mint fees.
+        let base_fees = br.fee_accumulators[0].accumulated_fees;
+        if base_fees > 0 {
+            let nonce = change_note::derive_nonce(now_slot, FEE_ROLE_BASE);
+            let r = change_note::derive_blinding(now_slot, FEE_ROLE_BASE);
+            let c = commitment_from_fields(
+                &base_mint.to_bytes(),
+                base_fees,
+                &protocol_owner_commitment,
+                &nonce,
+                &r,
+            )
+            .map_err(|_| error!(MatchingError::PoseidonFailed))?;
+            br.fee_accumulators[0].flushed_commitment = c;
+        }
+        // Slot 1 = quote-mint fees.
+        let quote_fees = br.fee_accumulators[1].accumulated_fees;
+        if quote_fees > 0 {
+            let nonce = change_note::derive_nonce(now_slot, FEE_ROLE_QUOTE);
+            let r = change_note::derive_blinding(now_slot, FEE_ROLE_QUOTE);
+            let c = commitment_from_fields(
+                &quote_mint.to_bytes(),
+                quote_fees,
+                &protocol_owner_commitment,
+                &nonce,
+                &r,
+            )
+            .map_err(|_| error!(MatchingError::PoseidonFailed))?;
+            br.fee_accumulators[1].flushed_commitment = c;
         }
     }
 
@@ -327,11 +439,15 @@ pub fn run_batch_handler(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
 
 /// Produce MatchResults for each (bid, ask) crossing at the uniform price.
 ///
-/// Phase 4 simplification: a match consumes the min of the two sides. If a
-/// FOK order cannot be fully matched this call it is cancelled (status set
-/// to CANCELLED) without consuming the counterparty. Partial residuals stay
-/// ACTIVE with reduced `amount` unless the order_type is IOC (caught by
-/// run_batch post-processing above).
+/// Phase 5 (change notes): when the input note is larger than the trade
+/// leg we emit a Poseidon commitment for a change note that returns the
+/// residual to the owner. Conservation:
+///   buyer_note_value  == quote_amt + buyer_change_amt
+///   seller_note_value == base_amt  + seller_change_amt
+/// Partial residuals on the *order* (vs. input-note) side stay ACTIVE with
+/// reduced `amount` unless the order_type is IOC (caught by run_batch's
+/// post-processing loop above).
+#[allow(clippy::too_many_arguments)]
 fn generate_matches(
     ctx: &Context<RunBatch>,
     p_star: u64,
@@ -339,6 +455,9 @@ fn generate_matches(
     now_slot: u64,
     bid_idxs: &[usize],
     ask_idxs: &[usize],
+    base_mint: &Pubkey,
+    quote_mint: &Pubkey,
+    fee_rate_bps: u64,
 ) -> Result<usize> {
     let mut produced: usize = 0;
     let mut bi = 0usize;
@@ -350,7 +469,12 @@ fn generate_matches(
 
         // Snapshot first under a read loan, then upgrade to a mutable loan
         // just for the writes so we don't hold the mut loan across the CPI.
-        let (b_price, b_amt, b_minfill, b_otype, b_tk, b_note) = {
+        // Phase 5: we read `collateral_note` (the note *currently* locked
+        // for this order, which after a prior partial fill + re-lock may
+        // be the change note from that earlier settlement) and
+        // `order_id` (needed to decide whether to emit a re-lock request
+        // to the settlement payload).
+        let (b_price, b_amt, b_minfill, b_otype, b_tk, b_note, b_nval, b_uc, b_oid) = {
             let clob = ctx.accounts.dark_clob.load()?;
             let o = &clob.orders[b_idx];
             (
@@ -359,10 +483,13 @@ fn generate_matches(
                 o.min_fill_qty,
                 o.order_type,
                 o.trading_key,
-                o.note_commitment,
+                o.collateral_note,
+                o.note_amount,
+                o.user_commitment,
+                o.order_id,
             )
         };
-        let (a_price, a_amt, a_minfill, a_otype, a_tk, a_note) = {
+        let (a_price, a_amt, a_minfill, a_otype, a_tk, a_note, a_nval, a_uc, a_oid) = {
             let clob = ctx.accounts.dark_clob.load()?;
             let o = &clob.orders[a_idx];
             (
@@ -371,7 +498,10 @@ fn generate_matches(
                 o.min_fill_qty,
                 o.order_type,
                 o.trading_key,
-                o.note_commitment,
+                o.collateral_note,
+                o.note_amount,
+                o.user_commitment,
+                o.order_id,
             )
         };
 
@@ -421,26 +551,120 @@ fn generate_matches(
             continue;
         }
 
-        // --- Write the MatchResult ---
-        let quote_amt = (crossable as u128)
+        // --- Trade legs ---
+        let quote_amt_u128 = (crossable as u128)
             .checked_mul(p_star as u128)
             .ok_or(MatchingError::NotionalOverflow)?;
-        if quote_amt > u64::MAX as u128 {
+        if quote_amt_u128 > u64::MAX as u128 {
             return err!(MatchingError::NotionalOverflow);
         }
-        let quote_amt = quote_amt as u64;
+        let quote_amt = quote_amt_u128 as u64;
+
+        // --- Fees: floor-division, applied to both sides of the notional ---
+        let buyer_fee_amt = ((quote_amt as u128) * fee_rate_bps as u128 / 10_000u128) as u64;
+        let seller_fee_amt = ((crossable as u128) * fee_rate_bps as u128 / 10_000u128) as u64;
+
+        // --- Conservation law: note.amount == trade_leg + change_leg + fee_leg ---
+        let buyer_charge = quote_amt
+            .checked_add(buyer_fee_amt)
+            .ok_or(MatchingError::FeeOverflow)?;
+        let seller_charge = crossable
+            .checked_add(seller_fee_amt)
+            .ok_or(MatchingError::FeeOverflow)?;
+        let buyer_change_amt = b_nval
+            .checked_sub(buyer_charge)
+            .ok_or(MatchingError::ConservationViolation)?;
+        let seller_change_amt = a_nval
+            .checked_sub(seller_charge)
+            .ok_or(MatchingError::ConservationViolation)?;
+
+        // --- Reserve a match_id now so change-note derivation uses it ---
+        let match_id = {
+            let br = ctx.accounts.batch_results.load()?;
+            br.next_match_id
+        };
+
+        // --- Change-note commitments (zero when amt == 0) ---
+        let note_e_commitment = if buyer_change_amt > 0 {
+            let nonce = change_note::derive_nonce(match_id, change_note::CHANGE_ROLE_BUYER);
+            let r = change_note::derive_blinding(match_id, change_note::CHANGE_ROLE_BUYER);
+            commitment_from_fields(
+                &quote_mint.to_bytes(),
+                buyer_change_amt,
+                &b_uc,
+                &nonce,
+                &r,
+            )
+            .map_err(|_| error!(MatchingError::PoseidonFailed))?
+        } else {
+            [0u8; 32]
+        };
+        let note_f_commitment = if seller_change_amt > 0 {
+            let nonce = change_note::derive_nonce(match_id, change_note::CHANGE_ROLE_SELLER);
+            let r = change_note::derive_blinding(match_id, change_note::CHANGE_ROLE_SELLER);
+            commitment_from_fields(
+                &base_mint.to_bytes(),
+                seller_change_amt,
+                &a_uc,
+                &nonce,
+                &r,
+            )
+            .map_err(|_| error!(MatchingError::PoseidonFailed))?
+        } else {
+            [0u8; 32]
+        };
+
+        // --- Re-lock eligibility: order has unfilled residual AND we
+        //     generated a change note to back it. Post-fill residuals are
+        //     detected by checking whether the match fully consumes the
+        //     order (crossable == x_amt ⇒ done; else partial). ---
+        let b_remaining_after = b_amt.saturating_sub(crossable);
+        let a_remaining_after = a_amt.saturating_sub(crossable);
+        // LIMIT orders with remaining qty re-lock. IOC/FOK are cancelled
+        // by post-processing so never re-lock.
+        let buyer_relock = b_remaining_after > 0 && b_otype == 0 && buyer_change_amt > 0;
+        let seller_relock = a_remaining_after > 0 && a_otype == 0 && seller_change_amt > 0;
+
+        // Re-lock expiry: reuse the order's existing expiry_slot — we've
+        // already drained anything within SETTLEMENT_BUFFER_SLOTS of now,
+        // so the remaining window is provably enough for settle+relock.
+        let (buyer_relock_order_id, buyer_relock_expiry) = if buyer_relock {
+            let clob = ctx.accounts.dark_clob.load()?;
+            (b_oid, clob.orders[b_idx].expiry_slot)
+        } else {
+            (RELOCK_ORDER_ID_NONE, 0)
+        };
+        let (seller_relock_order_id, seller_relock_expiry) = if seller_relock {
+            let clob = ctx.accounts.dark_clob.load()?;
+            (a_oid, clob.orders[a_idx].expiry_slot)
+        } else {
+            (RELOCK_ORDER_ID_NONE, 0)
+        };
 
         {
             let mut br = ctx.accounts.batch_results.load_mut()?;
             let slot = (br.write_cursor as usize) % BATCH_RESULTS_CAPACITY;
-            let match_id = br.next_match_id;
             let mr = MatchResult {
                 note_buyer: b_note,
                 note_seller: a_note,
+                note_e_commitment,
+                note_f_commitment,
                 owner_buyer: b_tk,
                 owner_seller: a_tk,
+                user_commitment_buyer: b_uc,
+                user_commitment_seller: a_uc,
+                buyer_note_value: b_nval,
+                seller_note_value: a_nval,
                 base_amt: crossable,
                 quote_amt,
+                buyer_change_amt,
+                seller_change_amt,
+                buyer_fee_amt,
+                seller_fee_amt,
+                buyer_relock_order_id,
+                buyer_relock_expiry,
+                seller_relock_order_id,
+                seller_relock_expiry,
                 price: p_star,
                 pyth_at_match: pyth_twap,
                 batch_slot: now_slot,
@@ -451,29 +675,53 @@ fn generate_matches(
             br.results[slot] = mr;
             br.write_cursor = br.write_cursor.saturating_add(1);
             br.next_match_id = br.next_match_id.saturating_add(1);
+
+            // Accumulate fees. fee_accumulators[0] = base, [1] = quote.
+            br.fee_accumulators[0].accumulated_fees = br.fee_accumulators[0]
+                .accumulated_fees
+                .saturating_add(seller_fee_amt);
+            br.fee_accumulators[1].accumulated_fees = br.fee_accumulators[1]
+                .accumulated_fees
+                .saturating_add(buyer_fee_amt);
         }
 
         // --- Update CLOB state ---
+        //
+        // Phase 5: `amount` is the remaining qty, `filled_quantity`
+        // accumulates. When a re-lock fires we rotate `collateral_note`
+        // to the change-note commitment and `note_amount` to its value
+        // so the NEXT batch's generate_matches operates on the new note.
+        // The order's `total_quantity` never changes.
         {
             let mut clob = ctx.accounts.dark_clob.load_mut()?;
             {
                 let o = &mut clob.orders[b_idx];
                 let new_amt = b_amt - crossable;
+                o.filled_quantity = o.filled_quantity.saturating_add(crossable);
                 if new_amt == 0 {
                     o.status = ORDER_STATUS_FILLED;
                     clob.order_count = clob.order_count.saturating_sub(1);
                 } else {
                     o.amount = new_amt;
+                    if buyer_relock {
+                        o.collateral_note = note_e_commitment;
+                        o.note_amount = buyer_change_amt;
+                    }
                 }
             }
             {
                 let o = &mut clob.orders[a_idx];
                 let new_amt = a_amt - crossable;
+                o.filled_quantity = o.filled_quantity.saturating_add(crossable);
                 if new_amt == 0 {
                     o.status = ORDER_STATUS_FILLED;
                     clob.order_count = clob.order_count.saturating_sub(1);
                 } else {
                     o.amount = new_amt;
+                    if seller_relock {
+                        o.collateral_note = note_f_commitment;
+                        o.note_amount = seller_change_amt;
+                    }
                 }
             }
         }

@@ -12,6 +12,7 @@
 
 use anchor_lang::prelude::*;
 
+use crate::state::fee_accumulator::FeeAccumulator;
 use crate::state::match_result::MatchResult;
 
 pub const BATCH_RESULTS_CAPACITY: usize = 16;
@@ -41,6 +42,12 @@ pub struct BatchResults {
     pub next_match_id: u64,
 
     pub results: [MatchResult; BATCH_RESULTS_CAPACITY],
+
+    /// Fee accumulators for this market. Slot 0 tracks the base mint, slot
+    /// 1 the quote mint. Seeded from `MatchingConfig.{base,quote}_mint` at
+    /// the start of each batch. The fee-note flush after `run_batch`
+    /// consumes and zero-initialises these.
+    pub fee_accumulators: [FeeAccumulator; 2],
 
     pub bump: u8,
     pub _padding_b: [u8; 7],

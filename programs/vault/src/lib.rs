@@ -92,8 +92,9 @@ pub mod vault {
         note_commitment: [u8; 32],
         order_id: [u8; 16],
         expiry_slot: u64,
+        amount: u64,
     ) -> Result<()> {
-        lock_note::lock_note_handler(ctx, note_commitment, order_id, expiry_slot)
+        lock_note::lock_note_handler(ctx, note_commitment, order_id, expiry_slot, amount)
     }
 
     /// Release an expired note lock.

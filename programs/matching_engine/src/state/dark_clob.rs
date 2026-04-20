@@ -11,14 +11,17 @@
 //! Phase 4 bump: the per-order struct grew from 136 to 176 bytes, so we
 //! dropped capacity from 64 to 48 to stay under the 10240-byte Anchor
 //! init-CPI realloc limit.
+//! Phase 5 bump: OrderRecord grew to 224 bytes (collateral_note rename +
+//! total_quantity + filled_quantity + user_commitment + note_amount) so
+//! capacity dropped from 48 to 45. Account size ≈ 10144 bytes.
 
 use anchor_lang::prelude::*;
 
 use crate::state::order_record::OrderRecord;
 
-/// Order slots per market. Phase-4 bumped down from 64 to fit the wider
-/// OrderRecord layout under the 10 240-byte realloc cap.
-pub const DARK_CLOB_CAPACITY: usize = 48;
+/// Order slots per market. Phase-5: 45 × 224B + 56B header + 8B disc =
+/// 10144 bytes, under the 10240-byte CPI init cap.
+pub const DARK_CLOB_CAPACITY: usize = 45;
 
 #[account(zero_copy)]
 #[repr(C)]

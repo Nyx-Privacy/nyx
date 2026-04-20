@@ -73,4 +73,16 @@ pub enum MatchingError {
     LockNoteCpiFailed,
     #[msg("Vault release_lock CPI failed")]
     ReleaseLockCpiFailed,
+
+    // ---- Phase 5: change-note conservation / commitment ----
+    #[msg("Conservation law violated: trade_leg + change_leg + fee_leg != note.amount")]
+    ConservationViolation,
+    #[msg("Poseidon commitment computation failed")]
+    PoseidonFailed,
+    #[msg("Order id must not be all-zero (reserved as RELOCK_ORDER_ID_NONE sentinel)")]
+    InvalidOrderId,
+    #[msg("Order expiry is within the settlement buffer; would be unsafe to match")]
+    OrderTooCloseToExpiry,
+    #[msg("Fee rate basis-points overflowed u64 when multiplied by notional")]
+    FeeOverflow,
 }

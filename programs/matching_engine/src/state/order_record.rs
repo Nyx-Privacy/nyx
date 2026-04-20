@@ -20,16 +20,41 @@ pub struct OrderRecord {
     pub expiry_slot: u64,
     /// Price limit in the market's native tick (base units per quote unit).
     pub price_limit: u64,
-    /// Size (base units).
+    /// Remaining order size (base units). Decremented on each partial fill.
+    /// Equivalent to `total_quantity - filled_quantity`; kept denormalised
+    /// so the matching loop doesn't need a subtraction per pairing.
     pub amount: u64,
     /// Minimum fill qty (base units). 0 = any fill allowed.
     /// Phase 4 rejects partial matches smaller than this.
     pub min_fill_qty: u64,
+    /// Full value of the note currently acting as collateral (bid side:
+    /// quote units, ask side: base units). Updates to the change note's
+    /// value on each partial-fill re-lock.
+    pub note_amount: u64,
+    /// Original full order size. Frozen at submit_order time and never
+    /// mutated — used by clients to render "filled X / Y" progress and by
+    /// the TEE to check whether a partial fill still has remainder.
+    pub total_quantity: u64,
+    /// Cumulative amount filled across all partial fills. Monotonically
+    /// non-decreasing. Relation: `filled_quantity + amount == total_quantity`.
+    pub filled_quantity: u64,
 
     pub trading_key: Pubkey,
-    pub note_commitment: [u8; 32],
-    /// `SHA-256(seq_no || note_commitment || trading_key)` — surfaced back
-    /// to the user for censorship audits and the batch Merkle inclusion root.
+    /// Note commitment of the note CURRENTLY locked as collateral for this
+    /// order. Starts as the original submit-order note; after a partial
+    /// fill + re-lock it is rewritten to the change-note commitment
+    /// (note_e for buyer orders, note_f for seller orders). The
+    /// matching-engine loop and settlement CPI both read this field, so
+    /// keeping it accurate is what prevents orphan orders.
+    pub collateral_note: [u8; 32],
+    /// User (wallet) commitment = Poseidon(spending_key, r_owner). Used by
+    /// Phase-5 run_batch as the `owner_commitment` field when constructing
+    /// change-note commitments so the owner can later VALID_SPEND them.
+    pub user_commitment: [u8; 32],
+    /// `SHA-256(seq_no || collateral_note_at_submit || trading_key)` —
+    /// surfaced back to the user for censorship audits and the batch
+    /// Merkle inclusion root. Anchored at submit time and NOT rotated
+    /// across re-locks (the inclusion proof is about the original submission).
     pub order_inclusion_commitment: [u8; 32],
     /// Caller-supplied 16-byte id. Used for `cancel_order` lookups and
     /// vault NoteLock derivation.
