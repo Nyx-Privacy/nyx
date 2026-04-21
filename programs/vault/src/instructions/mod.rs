@@ -3,7 +3,9 @@ pub mod deposit;
 pub mod initialize;
 pub mod lock_note;
 pub mod release_lock;
+pub mod reset_merkle_tree;
 pub mod rotate_root_key;
+pub mod set_protocol_config;
 pub mod tee_forced_settle;
 pub mod withdraw;
 
@@ -15,6 +17,8 @@ pub use deposit::*;
 pub use initialize::*;
 pub use lock_note::*;
 pub use release_lock::*;
+pub use reset_merkle_tree::*;
 pub use rotate_root_key::*;
+pub use set_protocol_config::*;
 pub use tee_forced_settle::*;
 pub use withdraw::*;

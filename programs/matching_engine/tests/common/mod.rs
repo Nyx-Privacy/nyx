@@ -15,8 +15,8 @@ use solana_transaction::Transaction;
 pub type Pubkey = Address;
 pub const SYSTEM_PROGRAM_ID: Pubkey = solana_system_interface::program::ID;
 
-pub const VAULT_PROGRAM_ID: &str = "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW";
-pub const ME_PROGRAM_ID: &str = "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K";
+pub const VAULT_PROGRAM_ID: &str = "ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY";
+pub const ME_PROGRAM_ID: &str = "DvYcaiBuaHgJFVjVd57JLM7ZMavzXvBezJwsvA46FJbH";
 
 pub fn repo_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

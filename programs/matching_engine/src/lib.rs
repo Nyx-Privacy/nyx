@@ -30,12 +30,13 @@ pub use instructions::cancel_order;
 pub use instructions::configure_access;
 pub use instructions::delegate_dark_clob;
 pub use instructions::init_market;
+pub use instructions::init_mock_oracle;
 pub use instructions::run_batch;
 pub use instructions::submit_order;
 
 use instructions::*;
 
-declare_id!("G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K");
+declare_id!("DvYcaiBuaHgJFVjVd57JLM7ZMavzXvBezJwsvA46FJbH");
 
 #[ephemeral]
 #[program]
@@ -79,5 +80,9 @@ pub mod matching_engine {
 
     pub fn run_batch(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
         run_batch::run_batch_handler(ctx, market)
+    }
+
+    pub fn init_mock_oracle(ctx: Context<InitMockOracle>, twap: u64) -> Result<()> {
+        init_mock_oracle::init_mock_oracle_handler(ctx, twap)
     }
 }

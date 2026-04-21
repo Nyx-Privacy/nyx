@@ -1,4 +1,9 @@
 //! Shared helpers for integration tests.
+#![allow(dead_code)]
+// Individual integration-test binaries pull in a subset of these helpers
+// (e.g. set_protocol_config.rs only needs `repo_root` + `anchor_disc`).
+// Cargo compiles each test crate independently and warns about the others;
+// the allow keeps `-D warnings` happy without sprinkling per-item allows.
 
 use std::fs;
 use std::path::PathBuf;

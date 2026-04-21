@@ -159,12 +159,22 @@ pub fn submit_order_handler(ctx: Context<SubmitOrder>, args: SubmitOrderArgs) ->
         require!(args.expiry_slot > now, MatchingError::ExpiryInPast);
     }
 
-    // Notional check: amount × price_limit ≤ note_amount.
-    let notional = (args.amount as u128)
-        .checked_mul(args.price_limit as u128)
-        .ok_or(MatchingError::NotionalOverflow)?;
+    // Notional / collateral sufficiency check:
+    //   - BUY:  note is QUOTE-denominated; required = amount * price_limit.
+    //   - SELL: note is BASE-denominated;  required = amount.
+    // `run_batch` applies the same-unit conservation law
+    // (`note.amount == trade_leg + change_leg + fee_leg`) where the legs
+    // are all in the note's native currency — so matching this check to
+    // the same semantic is the principled choice.
+    let required = if args.side == ORDER_SIDE_BID {
+        (args.amount as u128)
+            .checked_mul(args.price_limit as u128)
+            .ok_or(MatchingError::NotionalOverflow)?
+    } else {
+        args.amount as u128
+    };
     require!(
-        notional <= args.note_amount as u128,
+        required <= args.note_amount as u128,
         MatchingError::NotionalExceedsNoteValue
     );
 

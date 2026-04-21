@@ -26,14 +26,16 @@ pub use instructions::deposit;
 pub use instructions::initialize;
 pub use instructions::lock_note;
 pub use instructions::release_lock;
+pub use instructions::reset_merkle_tree;
 pub use instructions::rotate_root_key;
+pub use instructions::set_protocol_config;
 pub use instructions::tee_forced_settle;
 pub use instructions::withdraw;
 
 use instructions::*;
 use zk::Groth16Proof;
 
-declare_id!("AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW");
+declare_id!("ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY");
 
 #[program]
 pub mod vault {
@@ -102,11 +104,32 @@ pub mod vault {
         release_lock::release_lock_handler(ctx, note_commitment)
     }
 
+    /// Post-deployment governance setter for the protocol-fee fields of
+    /// `VaultConfig`. Admin-only. Safe to call repeatedly (e.g. to rotate
+    /// the protocol-owner commitment or change the fee rate).
+    pub fn set_protocol_config(
+        ctx: Context<SetProtocolConfig>,
+        protocol_owner_commitment: [u8; 32],
+        fee_rate_bps: u16,
+    ) -> Result<()> {
+        set_protocol_config::set_protocol_config_handler(
+            ctx,
+            protocol_owner_commitment,
+            fee_rate_bps,
+        )
+    }
+
     /// Atomic TEE-forced settlement.
     pub fn tee_forced_settle(
         ctx: Context<TeeForcedSettle>,
         payload: MatchResultPayload,
     ) -> Result<()> {
         tee_forced_settle::tee_forced_settle_handler(ctx, payload)
+    }
+
+    /// DEV-NET-ONLY: reset the Merkle tree to empty. Admin-gated. See
+    /// instructions/reset_merkle_tree.rs for rationale + caveats.
+    pub fn reset_merkle_tree(ctx: Context<ResetMerkleTree>) -> Result<()> {
+        reset_merkle_tree::reset_merkle_tree_handler(ctx)
     }
 }

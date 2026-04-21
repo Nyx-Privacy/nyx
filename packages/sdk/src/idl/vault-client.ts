@@ -158,6 +158,64 @@ export function buildInitializeInstruction(
   });
 }
 
+export interface BuildSetProtocolConfigParams {
+  programId: PublicKey;
+  admin: PublicKey;
+  protocolOwnerCommitment: Uint8Array; // 32B Poseidon commitment
+  feeRateBps: number; // 0..=10_000
+}
+
+function u16LE(v: number): Uint8Array {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, v, true);
+  return out;
+}
+
+export function buildSetProtocolConfigInstruction(
+  p: BuildSetProtocolConfigParams,
+): TransactionInstruction {
+  if (p.feeRateBps < 0 || p.feeRateBps > 10_000) {
+    throw new Error(`feeRateBps out of range: ${p.feeRateBps}`);
+  }
+  const [vaultPda] = vaultConfigPda(p.programId);
+  const data = cat(
+    anchorDiscriminator("set_protocol_config"),
+    fixed32(p.protocolOwnerCommitment),
+    u16LE(p.feeRateBps),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.admin, isSigner: true, isWritable: false },
+      { pubkey: vaultPda, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+export interface BuildResetMerkleTreeParams {
+  programId: PublicKey;
+  admin: PublicKey;
+}
+
+/**
+ * DEV-NET-ONLY: reset vault's Merkle tree to empty. Admin must sign.
+ */
+export function buildResetMerkleTreeInstruction(
+  p: BuildResetMerkleTreeParams,
+): TransactionInstruction {
+  const [vaultPda] = vaultConfigPda(p.programId);
+  const data = anchorDiscriminator("reset_merkle_tree");
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.admin, isSigner: true, isWritable: false },
+      { pubkey: vaultPda, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
 export interface BuildRotateRootKeyParams {
   programId: PublicKey;
   currentRootKey: PublicKey;

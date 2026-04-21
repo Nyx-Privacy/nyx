@@ -65,4 +65,6 @@ pub enum VaultError {
     ProtocolOwnerUnset,
     #[msg("Fee-note commitment supplied with zero fee (or vice-versa)")]
     FeeNoteInconsistent,
+    #[msg("Fee rate exceeds the allowed maximum (10000 bps)")]
+    InvalidFeeRate,
 }

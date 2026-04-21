@@ -28,10 +28,10 @@ import type {
 } from "../src/providers.js";
 
 const VAULT_PROGRAM_ID = new PublicKey(
-  "AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW",
+  "ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY",
 );
 const ME_PROGRAM_ID = new PublicKey(
-  "G8MHBmzhfvRnhejot7XfeSFm3NC96uqm7VNduutM1J2K",
+  "DvYcaiBuaHgJFVjVd57JLM7ZMavzXvBezJwsvA46FJbH",
 );
 
 function makeClient(opts: { noteStatus?: NoteStatusInfo } = {}): DarkPoolClient {

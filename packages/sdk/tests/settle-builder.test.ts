@@ -29,7 +29,7 @@ import {
   type MatchResultPayload,
 } from "../src/settlement/settle-builder.js";
 
-const PROGRAM_ID = new PublicKey("AB8ZJYgG6jNzfzQAgHHC9DNuQF6tB48UYqCWuseZ59XW");
+const PROGRAM_ID = new PublicKey("ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY");
 
 function filled(len: number, v: number): Uint8Array {
   const b = new Uint8Array(len);

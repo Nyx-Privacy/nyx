@@ -246,6 +246,7 @@ export function buildSubmitOrderInstruction(
     fixed16(p.orderId),
     new Uint8Array([p.orderType ?? OrderType.Limit]),
     u64LE(p.minFillQty ?? 0n),
+    fixed32(p.userCommitment), // Phase 5: owner-commitment tied to the trading key
   );
 
   const data = cat(anchorDiscriminator("submit_order"), argsBytes);
@@ -314,6 +315,8 @@ export function buildCancelOrderInstruction(
 
 export interface BuildRunBatchParams {
   programId: PublicKey;
+  /** Vault program id — needed to derive the cross-program vault_config PDA. */
+  vaultProgramId: PublicKey;
   teeAuthority: PublicKey;
   market: PublicKey;
   pythAccount: PublicKey;
@@ -325,6 +328,9 @@ export function buildRunBatchInstruction(
   const [clobPda] = darkClobPda(p.programId, p.market);
   const [matchPda] = matchingConfigPda(p.programId, p.market);
   const [batchPda] = batchResultsPda(p.programId, p.market);
+  // Phase 5: `vault_config` is a read-only snapshot; PDA is derived under the
+  // vault program id via `seeds::program = vault::ID` in the on-chain struct.
+  const [vaultCfg] = vaultConfigPda(p.vaultProgramId);
   const data = cat(anchorDiscriminator("run_batch"), p.market.toBytes());
   return new TransactionInstruction({
     programId: p.programId,
@@ -333,7 +339,47 @@ export function buildRunBatchInstruction(
       { pubkey: clobPda, isSigner: false, isWritable: true },
       { pubkey: matchPda, isSigner: false, isWritable: false },
       { pubkey: batchPda, isSigner: false, isWritable: true },
+      { pubkey: vaultCfg, isSigner: false, isWritable: false },
       { pubkey: p.pythAccount, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// init_mock_oracle (dev-net / test-only helper)
+// ---------------------------------------------------------------------------
+
+export interface BuildInitMockOracleParams {
+  programId: PublicKey;
+  payer: PublicKey;
+  mockOracle: PublicKey;
+  /** u64 TWAP written to bytes [8..16] of the mock oracle account. */
+  twap: bigint;
+}
+
+/**
+ * Create + initialise a 16-byte mock Pyth oracle account on devnet. The
+ * returned ix MUST be preceded (same tx, different signer set) by a fresh
+ * keypair signer for `mockOracle`. Total tx signers: [payer, mockOracle].
+ *
+ * Account layout written by the handler:
+ *   [0..8]   b"NYXMKPTH" (MOCK_PYTH_MAGIC)
+ *   [8..16]  u64 LE TWAP
+ */
+export function buildInitMockOracleInstruction(
+  p: BuildInitMockOracleParams,
+): TransactionInstruction {
+  const data = cat(
+    anchorDiscriminator("init_mock_oracle"),
+    u64LE(p.twap),
+  );
+  return new TransactionInstruction({
+    programId: p.programId,
+    keys: [
+      { pubkey: p.payer, isSigner: true, isWritable: true },
+      { pubkey: p.mockOracle, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(data),
   });
