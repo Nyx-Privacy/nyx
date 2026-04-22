@@ -27,12 +27,16 @@ pub mod instructions;
 pub mod state;
 
 pub use instructions::cancel_order;
+pub use instructions::commit_market_state;
 pub use instructions::configure_access;
+pub use instructions::delegate_batch_results;
 pub use instructions::delegate_dark_clob;
+pub use instructions::delegate_matching_config;
 pub use instructions::init_market;
 pub use instructions::init_mock_oracle;
 pub use instructions::run_batch;
 pub use instructions::submit_order;
+pub use instructions::undelegate_market;
 
 use instructions::*;
 
@@ -84,5 +88,27 @@ pub mod matching_engine {
 
     pub fn init_mock_oracle(ctx: Context<InitMockOracle>, twap: u64) -> Result<()> {
         init_mock_oracle::init_mock_oracle_handler(ctx, twap)
+    }
+
+    pub fn delegate_matching_config(
+        ctx: Context<DelegateMatchingConfig>,
+        market: Pubkey,
+    ) -> Result<()> {
+        delegate_matching_config::delegate_matching_config_handler(ctx, market)
+    }
+
+    pub fn delegate_batch_results(
+        ctx: Context<DelegateBatchResults>,
+        market: Pubkey,
+    ) -> Result<()> {
+        delegate_batch_results::delegate_batch_results_handler(ctx, market)
+    }
+
+    pub fn commit_market_state(ctx: Context<CommitMarketState>) -> Result<()> {
+        commit_market_state::commit_market_state_handler(ctx)
+    }
+
+    pub fn undelegate_market(ctx: Context<UndelegateMarket>) -> Result<()> {
+        undelegate_market::undelegate_market_handler(ctx)
     }
 }

@@ -1,15 +1,23 @@
 pub mod cancel_order;
+pub mod commit_market_state;
 pub mod configure_access;
+pub mod delegate_batch_results;
 pub mod delegate_dark_clob;
+pub mod delegate_matching_config;
 pub mod init_market;
 pub mod init_mock_oracle;
 pub mod run_batch;
 pub mod submit_order;
+pub mod undelegate_market;
 
 pub use cancel_order::*;
+pub use commit_market_state::*;
 pub use configure_access::*;
+pub use delegate_batch_results::*;
 pub use delegate_dark_clob::*;
+pub use delegate_matching_config::*;
 pub use init_market::*;
 pub use init_mock_oracle::*;
 pub use run_batch::*;
 pub use submit_order::*;
+pub use undelegate_market::*;

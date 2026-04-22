@@ -6,6 +6,21 @@ All commands assume your working directory is the repo root:
 cd /Users/arnabnandi/nyx-monorepo
 ```
 
+Organisation:
+- §0  one-time setup
+- §1  Rust (host-side)
+- §2  Rust (BPF / on-chain)
+- §3  TypeScript SDK
+- §4  Circuits (circom / snarkjs)
+- §5  "Everything is green" pre-commit gate
+- §6  Ad-hoc probes + parity helpers
+- §7  Running a single litesvm test with full logs
+- §8  Resetting state (local disk + on-chain Merkle tree)
+- §9  Devnet — deploy + environment + constants
+- §10 Devnet E2E — L1-only happy-path (setup + trade flow)
+- §11 Devnet E2E — ER (MagicBlock Ephemeral Rollup) cycle
+- §12 Troubleshooting common failures
+
 ---
 
 ## 0. One-time environment setup
@@ -44,14 +59,9 @@ cargo build --examples -p darkpool-crypto
 ### Build
 
 ```sh
-# Full workspace, debug build
-cargo build --workspace
-
-# Single crate / program
+cargo build --workspace                  # full workspace (debug)
 cargo build -p darkpool-crypto
-cargo build -p vault
-cargo build -p vault --all-targets        # includes integration tests
-cargo build -p matching_engine
+cargo build -p vault --all-targets       # includes integration tests
 cargo build -p matching_engine --all-targets
 ```
 
@@ -61,33 +71,31 @@ cargo build -p matching_engine --all-targets
 # Everything
 cargo test --workspace
 
-# Just the crypto primitives
+# Per-crate
 cargo test -p darkpool-crypto
-
-# Just the vault (merkle unit tests + ZK round-trips + create_wallet E2E)
 cargo test -p vault
+cargo test -p matching_engine
 
-# One specific integration test by file name
+# One integration test by file name
 cargo test -p vault --test merkle_host
-cargo test -p vault --test zk_roundtrip
 cargo test -p vault --test zk_spend_roundtrip
 cargo test -p vault --test user_commitment_registration
+cargo test -p vault --test settle            # Phase-5 settlement (15 scenarios)
+cargo test -p vault --test set_protocol_config
+cargo test -p vault --test reset_merkle_tree
 cargo test -p matching_engine --test submit_order
+cargo test -p matching_engine --test run_batch
 
-# A single test by name (substring)
-cargo test -p darkpool-crypto scope_aead_enforces_key_isolation
-cargo test -p darkpool-crypto commitment_excludes_trading_key
+# Single test name (substring)
+cargo test -p vault canonical_payload_hash_fixed_vector
 ```
 
 ### Lint / typecheck
 
 ```sh
-# Fails on any warning
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Formatting
-cargo fmt --all            # apply
-cargo fmt --all -- --check # verify only
+cargo clippy --workspace --all-targets -- -D warnings   # fails on any warning
+cargo fmt --all                                         # apply
+cargo fmt --all -- --check                              # verify only
 ```
 
 ---
@@ -99,16 +107,15 @@ cargo fmt --all -- --check # verify only
 cargo build-sbf --manifest-path programs/vault/Cargo.toml
 cargo build-sbf --manifest-path programs/matching_engine/Cargo.toml
 
-# Clean just one on-chain build
+# Show compiled sizes
+ls -lh target/deploy/vault.so target/deploy/matching_engine.so
+
+# Per-program clean
 cargo clean --manifest-path programs/vault/Cargo.toml
 cargo clean --manifest-path programs/matching_engine/Cargo.toml
 
-# Show the compiled .so sizes
-ls -lh target/deploy/vault.so target/deploy/matching_engine.so
-
-# Anchor-friendly full build (runs cargo-build-sbf + emits IDL if declared).
-# We don't use the IDL — our SDK hand-codes discriminators — but this is the
-# canonical way to verify the Anchor macros still accept your code.
+# Anchor-friendly full build (verifies Anchor macros still accept the code).
+# The IDL is NOT used — our SDK hand-codes discriminators.
 anchor build
 ```
 
@@ -119,29 +126,17 @@ anchor build
 ### Build / typecheck
 
 ```sh
-# Fast typecheck only
-./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit
-
-# Full build (emits packages/sdk/dist)
-cd packages/sdk && npm run build
+./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit   # fast typecheck
+cd packages/sdk && npm run build                                  # full build
 ```
 
 ### Test
 
 ```sh
-# Full SDK test run
-cd packages/sdk && ../../node_modules/.bin/vitest run
-
-# A single file
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/keys-parity.test.ts
+cd packages/sdk && ../../node_modules/.bin/vitest run                          # all
 cd packages/sdk && ../../node_modules/.bin/vitest run tests/poseidon-parity.test.ts
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/user-commitment-parity.test.ts
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/deposit-transport.test.ts
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/withdraw-transport.test.ts
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/orders-submit.test.ts
-
-# Watch mode (rerun on save)
-cd packages/sdk && ../../node_modules/.bin/vitest
+cd packages/sdk && ../../node_modules/.bin/vitest run tests/settle-builder.test.ts
+cd packages/sdk && ../../node_modules/.bin/vitest                              # watch
 ```
 
 ---
@@ -161,7 +156,7 @@ node scripts/parse-vk-to-rust.js \
   circuits/build/valid_wallet_create/verification_key.json \
   programs/vault/src/zk/vk_valid_wallet_create.rs
 
-# Ad-hoc: run a proof from a JSON witness through snarkjs + verify via cargo
+# Ad-hoc: round-trip proof through snarkjs + verify via cargo
 cargo test -p vault --test zk_roundtrip -- --nocapture
 ```
 
@@ -169,7 +164,7 @@ cargo test -p vault --test zk_roundtrip -- --nocapture
 
 ## 5. "Everything is green" full gate
 
-Run this before every commit. If any one line fails, do not commit.
+Run this before every commit. If any line fails, do not commit.
 
 ```sh
 set -e
@@ -183,140 +178,33 @@ cargo test --workspace
 echo "ALL GREEN"
 ```
 
-Expected counts today (Phase 4 complete):
+Expected counts (Phase 5 + ER wiring):
 
-| Layer | Count |
-|-------|-------|
-| Rust workspace tests  | 59 (27 crypto + 2 lib id + 6 merkle + 2 ZK + 1 wallet + 6 matching_engine lib + 4 submit_order + 11 run_batch) |
-| TypeScript tests      | 51 (33 prior + 6 cancel-order + 4 batch-watcher + 8 inclusion-proof) |
-
-## 9. Phase 3 — MagicBlock PER commands
-
-### 9.1 Standalone / mock (no network)
-
-```sh
-# Run only the Phase 3 on-chain tests (litesvm + mock TEE server)
-cargo test -p matching_engine --test submit_order -- --nocapture
-
-# Run only the Phase 3 TS tests (mock TEE)
-cd packages/sdk && ../../node_modules/.bin/vitest run tests/orders-submit.test.ts
-```
-
-### 9.2 Live devnet (RUN_PER_TESTS=1)
-
-```sh
-# one-time bootstrap:
-bash scripts/setup-devnet.sh     # generates + funds .devnet/keypairs/*
-bash scripts/deploy-devnet.sh    # deploys vault.so + matching_engine.so
-
-# run the devnet E2E suite
-cd packages/sdk && RUN_PER_TESTS=1 \
-  ../../node_modules/.bin/vitest run tests/orders-submit.devnet.test.ts
-```
-
-### 9.3 Reference constants
-
-| Thing                                       | Value                                          |
-|---------------------------------------------|------------------------------------------------|
-| Vault program id                            | ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY   |
-| Matching-engine program id                  | DvYcaiBuaHgJFVjVd57JLM7ZMavzXvBezJwsvA46FJbH   |
-| Permission program id (ER SDK 0.10.5 Rust)  | ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1   |
-| Permission program id (ER SDK 0.6.5 TS)     | BTWAqWNBmF2TboMh3fxMJfgR16xGHYD7Kgr2dPwbRPBi   |
-| TEE endpoint                                | https://tee.magicblock.app                     |
-| Env file (gitignored)                       | packages/sdk/.env.devnet                       |
-| Test keypair dir (gitignored)               | .devnet/keypairs/                              |
-
-Note: the two permission program ids are different versions of the same
-MagicBlock permission program. Our Rust on-chain program links `ACL...`;
-the TS `permissionPdaFromAccount` helper targets `BTW...`. For correct PDA
-derivation from TS, always derive with the `ACL...` id (see the
-`derivePermissionPda` helper in `tests/orders-submit.devnet.test.ts`).
+| Layer                  | Count                               |
+|------------------------|-------------------------------------|
+| Rust workspace tests   | 82 total (27 crypto + merkle + ZK + Phase-4 + Phase-5 settle + set_protocol_config + reset_merkle_tree + submit_order + run_batch) |
+| TS SDK unit tests      | 75 passing / 12 skipped (devnet / ER gated) |
 
 ---
 
-## 10. Phase 4 — batch auction + circuit breaker + cancel
-
-Phase 4 extends the engine with periodic uniform-clearing-price batching,
-Pyth-based circuit breaker, `cancel_order`, and the `BatchResults` match
-ring. All new tests are local (litesvm + vitest mocks); no live TEE needed.
-
-### 10.1 Run only the Phase-4 on-chain tests (litesvm)
+## 6. Ad-hoc probes
 
 ```sh
-# Pre-req: SBF binaries must be up to date.
-cargo build-sbf --manifest-path programs/vault/Cargo.toml
-cargo build-sbf --manifest-path programs/matching_engine/Cargo.toml
-
-# 6 lib unit tests (deviation math + merkle helpers)
-cargo test -p matching_engine --lib -- --nocapture
-
-# 11 integration tests (§23.4.2 + cancel flow)
-cargo test -p matching_engine --test run_batch -- --nocapture
-
-# 4 Phase-3 submit_order tests on new Phase-4 layouts (regression gate)
-cargo test -p matching_engine --test submit_order -- --nocapture
-```
-
-### 10.2 Run only the Phase-4 TS glue tests
-
-```sh
-cd packages/sdk && ../../node_modules/.bin/vitest run \
-  tests/cancel-order.test.ts \
-  tests/batch-watcher.test.ts \
-  tests/inclusion-proof.test.ts
-```
-
-### 10.3 Phase-4 devnet redeploy (after ABI change)
-
-`init_market` now takes 8 fields (adds base_mint, quote_mint,
-pyth_account, circuit_breaker_bps, tick_size, min_order_size). The
-`orders-submit.devnet.test.ts` suite passes them with synthetic values —
-`init_market` only persists, it doesn't call the oracle. To redeploy:
-
-```sh
-# Uploads programs/matching_engine/target/deploy/matching_engine.so
-# against AB8ZJYg... + G8MH... (keypairs live in .devnet/keypairs/).
-bash scripts/deploy-devnet.sh
-
-# Then run the regression suite:
-cd packages/sdk && RUN_PER_TESTS=1 \
-  ../../node_modules/.bin/vitest run tests/orders-submit.devnet.test.ts
-```
-
-### 10.4 Shape quick-reference
-
-| Field                        | Old (Phase 3) | New (Phase 4)     |
-|------------------------------|---------------|-------------------|
-| `InitMarketArgs` width       | 40 B          | 168 B             |
-| `SubmitOrderArgs` width      | 113 B         | 122 B             |
-| `OrderRecord` width          | 136 B         | 176 B             |
-| DarkCLOB capacity            | 64 orders     | 48 orders         |
-| New PDAs per market          | dark_clob,    | +batch_results    |
-|                              |  matching_cfg |                   |
-
----
-
-## 6. Useful ad-hoc probes
-
-```sh
-# Rebuild just the derive-keys helper (TS parity tests rely on it)
+# Rebuild the derive-keys CLI (TS parity tests depend on it)
 cargo build --example derive-keys -p darkpool-crypto
 ./target/debug/examples/derive-keys spending \
     000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f
 
-# Rebuild the poseidon-hash helper (Poseidon parity tests use it)
+# Rebuild the poseidon-hash helper
 cargo build --example poseidon-hash -p darkpool-crypto
 ./target/debug/examples/poseidon-hash 2 42 42
 
-# Rebuild the user-commitment helper (user-commitment parity test uses it)
+# user-commitment helper
 cargo build --example user-commitment -p darkpool-crypto
 
-# View what cargo thinks about cross-platform deps
+# Dep graph per target
 cargo tree -p darkpool-crypto --target aarch64-apple-darwin | head -30
-cargo tree -p darkpool-crypto --target sbf-solana-solana | head -30
-
-# Disassemble vault.so to sanity-check BPF code size after zero-copy refactor
-cargo-build-sbf --manifest-path programs/vault/Cargo.toml --dump
+cargo tree -p darkpool-crypto --target sbf-solana-solana     | head -30
 ```
 
 ---
@@ -328,245 +216,294 @@ RUST_LOG=debug RUST_BACKTRACE=1 \
   cargo test -p vault --test user_commitment_registration -- --nocapture
 ```
 
-`--nocapture` is important: without it the `eprintln!("create_wallet logs:")`
-block is hidden and any on-chain panic is silent.
+`--nocapture` matters: without it `eprintln!` and any on-chain panic are hidden.
 
 ---
 
 ## 8. Resetting state
 
+### 8.1 Local disk
+
 ```sh
-# Nuke all target artifacts + node_modules
+# Nuke everything: target artifacts + node_modules + circuit build
 cargo clean
 rm -rf node_modules packages/sdk/dist packages/sdk/node_modules circuits/build
 
-# Or a lighter reset (keep deps installed, only rebuild code)
+# Light reset (keep deps installed)
 cargo clean -p vault -p darkpool-crypto
 rm -rf packages/sdk/dist target/deploy/vault.so
 ```
 
----
+### 8.2 On-chain Merkle tree reset (devnet / staging only)
 
-## 9. Phase 5 — end-to-end devnet trade + settle flow (manual)
+The vault's incremental Merkle tree is a singleton PDA (`vault_config`).
+Once initialised it accumulates leaves across every deposit / settlement.
+That's fine in production but fatal in tests — the SDK's in-memory
+`MerkleShadow` starts empty, so after a few runs the shadow root diverges
+from the on-chain `current_root` and every `VALID_SPEND` withdrawal
+fails with `StaleMerkleRoot` (error 0x1774).
 
-### Prerequisites
-- Vault + matching_engine deployed and initialised on devnet (see §3).
-- TEE Ed25519 keypair on a HSM/enclave; public key matches
-  `vault_config.tee_pubkey`.
-- Two funded user keypairs (Alice = buyer, Bob = seller) each with a
-  registered WalletEntry and a funded deposit.
+**Symptom you'll see:**
+```
+Error Code: StaleMerkleRoot. Error Number: 6004.
+Message: Merkle root provided by proof does not match current on-chain root.
+```
 
-### Step 1 — deposit + lock notes for both sides
+**Cure:** call the dev-net-only `vault::reset_merkle_tree` admin ix. It
+wipes `leaf_count`, `right_path[..]`, and the `roots[..]` ring buffer,
+then recomputes `current_root` from `zero_subtree_roots`. Nullifier /
+wallet / deposit-in-flight PDAs are NOT touched (they're separate PDAs).
+
+You rarely call it manually — `devnet-setup.test.ts` does it for you:
+
 ```sh
-# Alice deposits 100 USDC, producing note_a (Poseidon commitment).
-scripts/deposit.sh alice 100000000 <usdc-mint>
-# Bob deposits 10 SOL, producing note_b.
-scripts/deposit.sh bob 10000000000 <sol-mint>
+# Running the setup test is the canonical way to "start fresh"
+RUN_DEVNET_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-setup.test.ts )
 ```
 
-### Step 2 — TEE relayer locks both notes
-Inside the ER validator (TEE), the matching engine's `submit_order` CPI
-into vault `lock_note` writes one `NoteLock { amount, order_id, expiry }`
-PDA per side. Trigger via:
-```sh
-npx tsx scripts/submit-order.ts --side buy  --amount 50 --price 100 --user alice
-npx tsx scripts/submit-order.ts --side sell --amount 50 --price 100 --user bob
-```
+Setup steps (each prints a TX + explorer URL):
+1. Create fresh BASE (9d) + QUOTE (6d) SPL mint pair.
+2. `vault::initialize` (idempotent).
+3. **`vault::reset_merkle_tree`** — wipes the tree.
+4. `vault::set_protocol_config` — sets `protocol_owner_commitment` + fee
+   rate (30 bps). Top byte of the protocol commitment is zeroed so the
+   Poseidon input stays < BN254 Fr.
+5. `matching_engine::init_mock_oracle` — creates a 16-byte NYXMKPTH
+   stub (u64 TWAP). Pyth Pull-v2 feeds aren't reliable on devnet, and
+   our `read_oracle` doesn't accept the legacy Pythnet layout.
+6. `matching_engine::init_market` — wires baseMint / quoteMint / the
+   mock oracle into a brand-new market PDA.
+7. Writes `.devnet/e2e-config.json` with everything the trade-flow
+   tests need (market pubkey, mint secret keys, protocol config, fee
+   rate, oracle pubkey).
 
-### Step 3 — run_batch (inside ER) emits MatchResult + fee note flush
-```sh
-# When a crossing is found, run_batch writes:
-#   - One MatchResult per crossing into BatchResults ring.
-#   - One Poseidon fee-note commitment per mint into fee_accumulators.
-npx tsx scripts/run-batch.ts --market <market-pubkey>
-```
+After setup completes you have: empty tree, a fresh market, mints you
+fully control, protocol config set, and an oracle that trips the
+circuit breaker only against a TWAP *you* set.
 
-### Step 4 — L1 settlement via `tee_forced_settle`
-The relayer fetches the MatchResult from `BatchResults`, constructs a
-`MatchResultPayload`, signs `canonicalPayloadHash(payload)` inside the
-TEE, and submits a 3-ix tx on devnet:
-
-1. `ComputeBudget::SetComputeUnitLimit(1_400_000)`
-2. `Ed25519Program::verify` with inline (pubkey, signature, msg_hash)
-3. `vault::tee_forced_settle(payload)`
-
-```ts
-// scripts/settle.ts
-import {
-  buildEd25519VerifyIx,
-  buildSettleIx,
-  canonicalPayloadHash,
-  exactFillPayload,
-} from "@nyx/sdk";
-
-const payload = exactFillPayload({ /* from MatchResult */ });
-// Partial fill → mutate:
-//   payload.buyerChangeAmt = 50n;
-//   payload.noteEcommitment = buyerChangeNotePoseidon;
-//   payload.buyerRelockOrderId = alice.orderId;
-//   payload.buyerRelockExpiry = slot + 200n;
-// Fee flush → mutate:
-//   payload.buyerFeeAmt = feeBuyer; payload.sellerFeeAmt = feeSeller;
-//   payload.noteFeeCommitment = feeNotePoseidon;
-
-const msg = canonicalPayloadHash(payload);
-const sig = await teeSign(msg); // HSM / enclave
-
-const tx = new Transaction().add(
-  ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-  buildEd25519VerifyIx({ teePubkey: teePk.toBytes(), signature: sig, message: msg }),
-  buildSettleIx({ programId: VAULT_ID, teeAuthority: teePk, payload }),
-);
-await provider.sendAndConfirm(tx, [teeKeypair]);
-```
-
-Watch the `TradeSettled` event and project it per side with
-`buyerNotification()` / `sellerNotification()` from `@nyx/sdk`.
-
-### Step 5 — withdraw trade legs (exact-fill case)
-```sh
-npx tsx scripts/withdraw.ts --user alice --note note_c --amount 50
-npx tsx scripts/withdraw.ts --user bob   --note note_d --amount 50
-```
-
-### Step 6 — withdraw protocol fees
-After a batch flushes a fee note:
-```sh
-npx tsx scripts/withdraw.ts --user protocol --note note_fee --amount <fee_total>
-```
-
-### E2E scenarios to cover manually on devnet
-| Scenario                                              | Assertion                                      |
-| ----------------------------------------------------- | ---------------------------------------------- |
-| exact-fill + fee flush + both sides withdraw          | vault token balances conserved (incl. fees)    |
-| partial-fill w/ buyer re-lock                         | batch N+1 fills residual from note_e; MatchResult.filledQuantity evolves |
-| both-sides partial with two change notes              | 4 output notes appended (c/d/e/f); 2 continuing re-locks active |
-| circuit breaker trip                                  | fee_accumulators.flushed_commitment stays zero |
-| expired re-lock                                       | `release_lock(note_e)` succeeds after expiry   |
-| cancel mid-fill                                       | collateral NoteLock released; next run_batch drops the order |
-| double-spend attempt (same nullifiers, new payload)   | tx fails on nullifier PDA init                 |
-| tampered Ed25519 signature                            | `InvalidTeeSignature` error; no state mutation |
+Re-run it any time the shadow-tree invariant fires.
 
 ---
 
-## 10. Phase 5 — local Rust settlement tests
+## 9. Devnet — deploy + environment + constants
 
-All 15 settlement scenarios (including Ed25519 negative paths + fee-note
-cases) live in `programs/matching_engine/tests/settle.rs`:
+### 9.1 Deploy the programs
 
 ```sh
-cargo test -p matching_engine --test settle -- --nocapture
+# One-time: generates + funds .devnet/keypairs/*
+bash scripts/setup-devnet.sh
+
+# Redeploys target/deploy/{vault,matching_engine}.so at the declared program IDs
+bash scripts/deploy-devnet.sh
 ```
 
-`set_protocol_config` admin tests:
-```sh
-cargo test -p vault --test set_protocol_config
-```
+`deploy-devnet.sh` is idempotent — it reuses the existing program IDs
+(upgrade in place). If you touched a program, remember to
+`cargo build-sbf` first.
 
-Cross-environment canonical-hash parity:
-```sh
-cargo test -p vault canonical_payload_hash_fixed_vector
-```
-+ the matching TS expectation in
-`packages/sdk/tests/settle-builder.test.ts::[hash_cross_env_parity]`.
+> **Stale BPF pitfall:** if you see `DeclaredProgramIdMismatch` (0x1004)
+> or any `ProgramNotFound`, your `.so` is out of date. `touch`
+> `programs/<prog>/src/lib.rs` and rebuild to force a fresh compile:
+>
+> ```sh
+> touch programs/matching_engine/src/lib.rs
+> cargo build-sbf --manifest-path programs/matching_engine/Cargo.toml
+> bash scripts/deploy-devnet.sh
+> ```
+
+### 9.2 Reference constants
+
+| Thing                                   | Value                                         |
+|-----------------------------------------|-----------------------------------------------|
+| Vault program id                        | `ELt4FH2gH8RaZkYbvbbDjGkX8dPhGFdWnspM4w1fdjoY` |
+| Matching-engine program id              | `DvYcaiBuaHgJFVjVd57JLM7ZMavzXvBezJwsvA46FJbH` |
+| MagicBlock delegation program id        | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh` |
+| MagicBlock magic program id             | `Magic11111111111111111111111111111111111111`  |
+| MagicBlock magic context id             | `MagicContext1111111111111111111111111111111`  |
+| MagicBlock ER devnet entry              | `https://devnet.magicblock.app`               |
+| Permission program id (on-chain Rust)   | `ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1` |
+| Env file (gitignored)                   | `packages/sdk/.env.devnet`                    |
+| Test keypair dir (gitignored)           | `.devnet/keypairs/`                           |
+| Runtime config (gitignored)             | `.devnet/e2e-config.json`                     |
 
 ---
 
-## 11. Phase 5 — **real** devnet E2E test
+## 10. Devnet E2E — L1-only happy-path
 
-Two real devnet test files now replace the aspirational `deposit.sh`,
-`submit-order.ts`, `run-batch.ts`, `withdraw.ts` references that used to
-sit in §9:
+Two test files, always run setup first.
 
-- `packages/sdk/tests/devnet-setup.test.ts` — one-time setup.
-- `packages/sdk/tests/devnet-trade-flow.test.ts` — happy-path flow.
+### 10.1 Setup — fresh mints + fresh market + Merkle-tree reset
+
+```sh
+RUN_DEVNET_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-setup.test.ts )
+```
+
+See §8.2 for what happens inside.
+
+### 10.2 Trade flow — deposit → match → settle → withdraw
+
+```sh
+RUN_DEVNET_E2E=1 \
+  ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
+  TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
+  ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-trade-flow.test.ts )
+```
+
+`FUNDER_KEYPAIR` defaults to `admin` if unset. On free-tier RPCs the
+admin rarely has enough SOL for both personas + protocol ATAs + ZK ixs,
+so point it at a wallet you manually funded via a faucet.
+
+What this exercises:
+1. Persona generation (Alice, Bob) — persisted to `.devnet/keypairs/{alice,bob}-*`.
+2. Funder top-ups Alice + Bob payer / trading keys if below thresholds.
+3. Mint BASE / QUOTE balances.
+4. `create_wallet` with VALID_WALLET_CREATE proof (idempotent-skip if
+   the `WalletEntry` PDA already exists).
+5. Deposit notes → shadow tree sync.
+6. `submit_order` x2 — **on L1** (see §11.0 for why).
+7. `run_batch` **on L1** — finds the crossing.
+8-11. Decode BatchResults → build `MatchResultPayload` → Ed25519 + settle
+   → three VALID_SPEND withdrawals.
+
+Final assertion: Alice's BASE balance == 50, Bob's QUOTE == 5000.
+
+The partial-fill scenario is documented in the same file (second
+describe block) but gated on `RUN_DEVNET_PARTIAL_FILL=1`.
+
+---
+
+## 11. Devnet E2E — ER (MagicBlock Ephemeral Rollup) cycle
+
+### 11.0 Architecture in one paragraph
+
+Three market PDAs (`DarkCLOB`, `MatchingConfig`, `BatchResults`) are
+**delegated** on L1 to the MagicBlock ER validator, `run_batch` runs
+**inside the ER session**, then we CPI `ScheduleCommitAndUndelegate`
+which commits the new state back to L1 and returns the PDAs to
+`matching_engine` ownership. Settlement (`tee_forced_settle`) and
+withdraws happen on L1 as usual.
+
+`submit_order` currently still runs **on L1** in the test — see §11.5
+for why and what's planned.
 
 ### 11.1 Prerequisites
 
-1. `cargo build-sbf` for both programs (required by §2).
-2. `bash scripts/build-circuits.sh` — produces the wasm + zkey artifacts
-   used by the TS prover.
-3. `.devnet/keypairs/{admin,tee_authority,root_key,trader}.json` —
-   generated by `bash scripts/setup-devnet.sh`.
-4. **Redeploy** the vault program after the Phase-5 changes (new
-   `set_protocol_config` ix + the Ed25519 sysvar account on
-   `tee_forced_settle`):
-   ```sh
-   bash scripts/deploy-devnet.sh
-   ```
-5. A Solana CLI that can airdrop on devnet; admin keypair should hold at
-   least 0.5 SOL.
+1. Programs deployed (§9.1), including the new ER ixs:
+   `delegate_dark_clob`, `delegate_matching_config`,
+   `delegate_batch_results`, `commit_market_state`, `undelegate_market`,
+   and the Pyth-alternative `init_mock_oracle`.
+2. Setup test run (§8.2 / §10.1) — fresh market + wiped tree.
+3. A funder keypair with ≥ 0.4 SOL (delegation creates 3 buffer /
+   record / metadata PDAs per market, so the 0.3-SOL threshold from the
+   L1 test isn't enough).
+4. `ER_RPC_URL` defaults to `https://devnet.magicblock.app`; override
+   via env if you have a private validator endpoint.
 
-### 11.2 Run the one-time setup test
-
-Creates a fresh BASE (9d) + QUOTE (6d) SPL mint pair, initialises the
-vault if not already initialised, sets `protocol_owner_commitment` +
-`fee_rate_bps` via the new `set_protocol_config` ix, and persists
-everything to `.devnet/e2e-config.json`:
+### 11.2 Run the ER trade flow
 
 ```sh
+# Always run setup first (or whenever the shadow tree diverges):
 RUN_DEVNET_E2E=1 \
   ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
   TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
   ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
-  cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-setup.test.ts
-```
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-setup.test.ts )
 
-### 11.3 Run the trade-flow test
-
-Reads `.devnet/e2e-config.json`, creates fresh Alice + Bob personas,
-airdrops SOL, mints tokens, creates WalletEntry PDAs via
-VALID_WALLET_CREATE proofs, deposits into the vault, submits orders,
-calls `run_batch`, signs the `MatchResultPayload` inside a local "TEE"
-(nacl), submits `tee_forced_settle`, and finally withdraws via real
-VALID_SPEND proofs. Every step prints a highlighted block with the
-transaction hash + explorer URL.
-
-```sh
-RUN_DEVNET_E2E=1 \
+# Then the ER flow:
+RUN_ER_E2E=1 \
   ADMIN_KEYPAIR=.devnet/keypairs/admin.json \
   TEE_AUTHORITY_KEYPAIR=.devnet/keypairs/tee_authority.json \
-  ROOT_KEY_KEYPAIR=.devnet/keypairs/root_key.json \
-  cd packages/sdk && ../../node_modules/.bin/vitest run tests/devnet-trade-flow.test.ts
+  FUNDER_KEYPAIR=~/.config/solana/id.json \
+  ( cd packages/sdk && ../../node_modules/.bin/vitest run tests/er-trade-flow.test.ts )
 ```
 
-The test concludes by asserting:
-- Alice's on-chain BASE balance == `base_amt` (50).
-- Bob's on-chain QUOTE balance == `quote_amt` (5000).
+### 11.3 The 13 steps, with cluster routing
 
-### 11.4 Deliberate shortcuts (track as TODOs)
+| # | Cluster | Step                                                                 |
+|---|---------|----------------------------------------------------------------------|
+| 1 | local   | Generate ER-suffixed Alice / Bob personas                            |
+| 2 | L1      | Fund Alice + Bob (SystemProgram.transfer from funder)                |
+| 3 | L1      | Mint BASE / QUOTE to payer ATAs                                      |
+| 4 | L1      | `create_wallet` (VALID_WALLET_CREATE proof)                          |
+| 5 | L1      | `deposit` → shadow tree sync                                         |
+| 6 | L1      | `submit_order` x2 (CPIs `vault::lock_note`)                           |
+| 7 | **L1**  | **`delegate_dark_clob` + `delegate_matching_config` + `delegate_batch_results`** (atomic) |
+| 8 | **ER**  | **`run_batch`** — matches Alice vs Bob inside the rollup             |
+| 9 | **ER**  | **`undelegate_market`** (CPIs `ScheduleCommitAndUndelegate`)          |
+| 10| L1 poll | Wait for L1 BatchResults to reflect the ER commit (hash changes)     |
+| 11| L1      | Build MatchResultPayload + TEE-sign canonical hash                   |
+| 12| L1      | `tee_forced_settle` (Ed25519 + settle ix)                            |
+| 13| L1      | VALID_SPEND withdraws — Alice receives BASE, Bob receives QUOTE      |
 
-1. **No ER delegate cycle.** `run_batch` is called directly on L1. In
-   production the DarkCLOB is delegated to the MagicBlock ER, the batch
-   runs in the enclave, and the PDA is undelegated back before settle.
-   Every piece is implemented; wiring is pending.
-2. **Local TEE.** A vanilla `Keypair` plays the role of the TEE. Real
-   deployment pins the keypair inside a TDX/SEV enclave and uses the
-   remote-attestation handshake.
-3. **TRADE_ROLE_\* test-only derivation.** `note_c` / `note_d` plaintexts
-   are reconstructed off-chain by the user via a deterministic
-   `SHA-256(domain_tag, match_id, role)` scheme defined in
-   `tests/helpers/e2e-helpers.ts`. In production the TEE ships the
-   plaintext via the PER session.
-4. **TS prover shells out to the snarkjs CLI** — good enough for tests
-   (~1s per proof), not for browser. `packages/sdk/src/zk/prover-suite.ts`
-   still ships `UnimplementedProverSuite`; Phase 6 replaces the
-   shell-out with a real `WebProverSuite`.
-5. **Partial-fill + re-lock scenario is documented but not exercised on
-   devnet yet.** The second describe block in
-   `devnet-trade-flow.test.ts` lays out the expected sequence; enable
-   with `RUN_DEVNET_PARTIAL_FILL=1` once you wire up a Charlie persona
-   to consume Alice's re-locked residual.
+### 11.4 Personas are ER-independent
 
-### 11.5 If the test fails
+The ER test uses `alice-er-*` / `bob-er-*` keypairs so it doesn't
+collide with the L1-only test's personas. You can run both tests
+against the same devnet vault (after a setup wipe) without
+`NoteAlreadyLocked` or `WalletEntry`-collision errors.
 
-- Always `--nocapture` with vitest via `-t <pattern>` — the narrative
-  logs are the primary debug surface.
-- Check `Explorer` URLs printed next to each `TX:` — devnet logs will
-  tell you which ix reverted.
-- Common failure: `vault` not re-deployed post-Phase-5 → the Ed25519
-  sysvar account in `tee_forced_settle` mismatches the old ABI. Rerun
-  §11.1 step 4.
-- Also common: `TEE_AUTHORITY_KEYPAIR` must match
-  `vault_config.tee_pubkey`. If you rotated keys, either re-initialise
-  the vault or redeploy with a matching keypair.
+### 11.5 Deliberate shortcuts still in the ER flow (track as TODOs)
+
+1. **`submit_order` is still on L1.** The order payload (`amount`,
+   `price_limit`, `side`) is therefore visible in devnet tx logs.
+   *Moving this into the ER session is the single biggest remaining
+   work item for a true darkpool (see §13 below).*
+2. **TEE is a local `Keypair`.** Real deployment pins the keypair
+   inside a TDX/SEV enclave + remote-attestation handshake.
+3. **TRADE_ROLE_\* test-only derivation.** `note_c` / `note_d`
+   plaintexts are reconstructed off-chain via
+   `SHA-256(domain_tag, match_id, role)`. In production the TEE ships
+   them to the user via the PER session.
+4. **`delegate_X` ixs don't take a validator preference.** MagicBlock
+   default-picks a validator. Plumb a preferred-validator arg once
+   governance owns the choice.
+5. **No auto-commit scheduler.** The test commits manually via
+   `undelegate_market`. In production the TEE would call
+   `commit_market_state` (keeps delegation) every N slots so
+   settlement can pick up matches without a full undelegate cycle.
+
+---
+
+## 12. Troubleshooting common failures
+
+| Error                                                                 | Likely cause                                                                                  | Fix                                                                                       |
+|-----------------------------------------------------------------------|------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `DeclaredProgramIdMismatch (0x1004)`                                   | Stale `.so` on devnet — program ID in source doesn't match deployed binary.                    | `touch` the program's `src/lib.rs`, `cargo build-sbf`, `bash scripts/deploy-devnet.sh`.    |
+| `StaleMerkleRoot (6004 / 0x1774)` on withdraw                          | SDK's MerkleShadow diverged from on-chain tree (too many prior runs accumulated).              | Re-run `devnet-setup.test.ts` — it calls `reset_merkle_tree` (§8.2).                      |
+| `ConservationViolation (6029 / 0x178d)` in run_batch                   | `note_amount` passed to `submit_order` doesn't match the deposited note's native currency.     | Pass `noteAmount = p.depositNote.amount` (QUOTE for BUY, BASE for SELL).                  |
+| `PoseidonFailed (6030 / 0x178e)`                                       | A 32-byte input's top byte exceeds 0x30 → value ≥ BN254 Fr modulus.                            | Zero the top byte of the offending field (e.g. `protocolOwnerCommitment[0] = 0`).          |
+| `OracleUnrecognisedLayout (6063)`                                      | Supplied Pyth account is the legacy Pythnet magic (0xa1b2c3d4) — our `read_oracle` accepts only Pull-v2 or our NYXMKPTH mock. | Let setup create a mock oracle (default), or supply a real Pyth Pull-v2 account.          |
+| `AccountOwnedByWrongProgram` on `batch_results` after ER run           | Commit hasn't landed on L1 yet; tx raced the commit.                                           | Bump `waitForL1AccountChange` timeout, or ensure `undelegate_market` is confirmed before polling. |
+| `AnchorError ConstraintSeeds (2006)` during `delegate_*`               | SDK account-meta wire order doesn't match the `#[delegate]` macro expansion.                   | Order MUST be `[payer, buffer, delegation_record, delegation_metadata, pda, owner_program, delegation_program, system_program]`. |
+| `Simulation failed: insufficient funds`                                 | Funder balance below threshold (0.3 SOL L1 / 0.4 SOL ER).                                      | Set `FUNDER_KEYPAIR=<path-to-wallet-with-SOL>`.                                            |
+| `InvalidProof (6000 / 0x1770)` on `create_wallet`                      | VALID_WALLET_CREATE public input ordering or Fr-pair convention mismatch.                      | Regenerate proof with the pair convention `[lo, hi]` (see `pubkeyToFrPair`).               |
+
+---
+
+## 13. What is NOT yet on devnet (v1 open work)
+
+See the response block in chat for the full backlog. Highlights:
+
+1. **Move `submit_order` into the ER session** so order intents stay
+   private — currently public on L1.
+2. Real TDX/SEV TEE + remote attestation (Phase 6).
+3. Browser prover (`WebProverSuite`) replacing the snarkjs shell-out.
+4. Partial-fill + re-lock scenario exercised on devnet (code paths
+   exist; test harness stub-only).
+5. Cancel-order via ER (currently L1-only; blocked on step 1).
+6. Emergency `force_undelegate_on_l1` admin ix (pressure valve).
+7. Real protocol-owner keypair for fee withdrawal (currently a
+   synthetic tag — fee notes accumulate but can't be spent).
+8. Continuous ER ↔ L1 commit scheduler inside the TEE loop.
+9. Oracle refresh inside long-running ER sessions (clone-at-open only
+   today).

@@ -19,22 +19,17 @@ pub struct DelegateDarkClob<'info> {
     /// CHECK: Delegated to the ER validator via the #[delegate] macro.
     #[account(mut, del)]
     pub pda: AccountInfo<'info>,
-
-    /// CHECK: Optional validator pubkey. If provided, the delegation targets
-    /// this specific validator; otherwise MagicBlock picks one.
-    pub validator: Option<AccountInfo<'info>>,
 }
 
 pub fn delegate_dark_clob_handler(ctx: Context<DelegateDarkClob>, market: Pubkey) -> Result<()> {
     let seed_refs: &[&[u8]] = &[crate::state::DarkCLOB::SEED, market.as_ref()];
-    let validator = ctx.accounts.validator.as_ref().map(|a| a.key());
+    // MagicBlock default-picks a validator. For production we'll want the
+    // admin to pass a preferred validator; plumb it through the args when
+    // the governance story lands.
     ctx.accounts.delegate_pda(
         &ctx.accounts.payer,
         seed_refs,
-        DelegateConfig {
-            validator,
-            ..Default::default()
-        },
+        DelegateConfig::default(),
     )?;
     Ok(())
 }
