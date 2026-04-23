@@ -5,6 +5,7 @@ pub mod fee_accumulator;
 pub mod match_result;
 pub mod matching_config;
 pub mod order_record;
+pub mod pending_order;
 pub mod pyth;
 
 pub use batch_results::*;
@@ -14,3 +15,4 @@ pub use fee_accumulator::*;
 pub use match_result::*;
 pub use matching_config::*;
 pub use order_record::*;
+pub use pending_order::*;

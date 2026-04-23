@@ -32,8 +32,10 @@ pub use instructions::configure_access;
 pub use instructions::delegate_batch_results;
 pub use instructions::delegate_dark_clob;
 pub use instructions::delegate_matching_config;
+pub use instructions::delegate_pending_order;
 pub use instructions::init_market;
 pub use instructions::init_mock_oracle;
+pub use instructions::init_pending_order_slot;
 pub use instructions::run_batch;
 pub use instructions::submit_order;
 pub use instructions::undelegate_market;
@@ -67,6 +69,28 @@ pub mod matching_engine {
         delegate_dark_clob::delegate_dark_clob_handler(ctx, market)
     }
 
+    pub fn init_pending_order_slot(
+        ctx: Context<InitPendingOrderSlot>,
+        market: Pubkey,
+        slot_index: u8,
+    ) -> Result<()> {
+        init_pending_order_slot::init_pending_order_slot_handler(ctx, market, slot_index)
+    }
+
+    pub fn delegate_pending_order(
+        ctx: Context<DelegatePendingOrder>,
+        market: Pubkey,
+        slot_index: u8,
+        trading_key_pubkey: Pubkey,
+    ) -> Result<()> {
+        delegate_pending_order::delegate_pending_order_handler(
+            ctx,
+            market,
+            slot_index,
+            trading_key_pubkey,
+        )
+    }
+
     pub fn submit_order(
         ctx: Context<SubmitOrder>,
         args: submit_order::SubmitOrderArgs,
@@ -77,9 +101,9 @@ pub mod matching_engine {
     pub fn cancel_order(
         ctx: Context<CancelOrder>,
         market: Pubkey,
-        order_id: [u8; 16],
+        slot_index: u8,
     ) -> Result<()> {
-        cancel_order::cancel_order_handler(ctx, market, order_id)
+        cancel_order::cancel_order_handler(ctx, market, slot_index)
     }
 
     pub fn run_batch(ctx: Context<RunBatch>, market: Pubkey) -> Result<()> {
